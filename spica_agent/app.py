@@ -6,6 +6,8 @@ import time
 
 from .config import AppConfig, ConfigError
 from .env_file import EnvFileError, load_env_file
+from .phone import PhoneStateStore
+from .phone_http import PhoneHttpServer
 from .telegram import TelegramClient, TelegramError, TelegramMessage
 from .tmux_bridge import TmuxBridge, TmuxError
 from .worker import ClaudeWorker, WorkItem
@@ -20,10 +22,12 @@ class BridgeApp:
         config: AppConfig,
         telegram: TelegramClient,
         worker: ClaudeWorker,
+        phone_store: PhoneStateStore | None = None,
     ) -> None:
         self._config = config
         self._telegram = telegram
         self._worker = worker
+        self._phone_store = phone_store
         self._last_telegram_error = ""
         self._last_telegram_error_log_at = 0.0
         self._telegram_error_count = 0
@@ -124,6 +128,16 @@ class BridgeApp:
 
         if command == "/status":
             self._telegram.send_message(message.chat_id, self._status_text())
+            return
+
+        if command == "/phone":
+            if self._phone_store is None:
+                self._telegram.send_message(message.chat_id, "手机状态接收端未启用。")
+            else:
+                self._telegram.send_message(
+                    message.chat_id,
+                    self._phone_store.format_latest_status(),
+                )
             return
 
         if command == "/cancel":
@@ -269,8 +283,23 @@ def main() -> int:
 
     worker = ClaudeWorker(config, tmux, telegram)
     worker.start()
+    phone_store: PhoneStateStore | None = None
+    if config.phone_bridge_enabled:
+        phone_store = PhoneStateStore()
+        notify_chat_ids = config.phone_notify_chat_ids or config.telegram_allowed_chat_ids
+        phone_http = PhoneHttpServer(
+            host=config.phone_bridge_host,
+            port=config.phone_bridge_port,
+            token=config.phone_bridge_token,
+            store=phone_store,
+            telegram=telegram,
+            notify_chat_ids=notify_chat_ids,
+        )
+        phone_http.start()
+        host, port = phone_http.server_address
+        LOGGER.info("Phone bridge HTTP started on %s:%s", host, port)
     LOGGER.info("SpicaAgent bridge started")
-    BridgeApp(config, telegram, worker).run()
+    BridgeApp(config, telegram, worker, phone_store).run()
     return 0
 
 

@@ -45,6 +45,11 @@ Defaults:
 - `CLAUDE_FORWARD_ENV_VARS=HTTP_PROXY,HTTPS_PROXY,ALL_PROXY,NO_PROXY,http_proxy,https_proxy,all_proxy,no_proxy`
 - `CLAUDE_READY_TIMEOUT=120`
 - `CLAUDE_CAPTURE_LINES=2000`
+- `PHONE_BRIDGE_ENABLED=false`
+- `PHONE_BRIDGE_HOST=0.0.0.0`
+- `PHONE_BRIDGE_PORT=8765`
+- `PHONE_BRIDGE_TOKEN=<empty>`
+- `PHONE_NOTIFY_CHAT_IDS=<empty, falls back to TELEGRAM_ALLOWED_CHAT_IDS>`
 
 `CLAUDE_ENV_FILE` is parsed safely. Only `export KEY=value` and `KEY=value`
 lines are accepted; the bridge does not execute shell commands from the file.
@@ -83,6 +88,8 @@ Telegram network warnings are rate-limited in the logs.
 
 - `/whoami`: show the current chat id.
 - `/status`: show worker state, active chat, queue length, and tmux session.
+- `/phone`: show the most recent Android companion status received by the phone
+  bridge.
 - `/cancel`: send Ctrl-C to the active Claude operation.
 - `/restart_claude` or `/new_claude`: restart the background Claude Code tmux
   session and clear Claude's conversation context. This only runs when the
@@ -112,3 +119,13 @@ the worker waits until Claude Code is idle, and returned text is filtered to
 remove Claude's terminal chrome such as the welcome screen, prompt line, borders,
 and shortcut footer. During polling, only the most recent `CLAUDE_CAPTURE_LINES`
 tmux lines are captured to keep long-running sessions responsive.
+
+## Android Companion Status Bridge
+
+Set `PHONE_BRIDGE_ENABLED=true` and `PHONE_BRIDGE_TOKEN` to start a small local
+HTTP receiver for the Android companion app. The app sends batched status events
+to `POST /api/phone/events` with `Authorization: Bearer <PHONE_BRIDGE_TOKEN>`.
+The receiver stores the latest status in memory, exposes it via `/phone`, and
+sends proactive Telegram notifications for first connection, low battery, and
+long app usage. If `PHONE_NOTIFY_CHAT_IDS` is empty, proactive messages are sent
+to `TELEGRAM_ALLOWED_CHAT_IDS`.

@@ -84,6 +84,11 @@ class AppConfig:
     claude_poll_interval: float
     claude_history_limit: int
     claude_capture_lines: int
+    phone_bridge_enabled: bool
+    phone_bridge_host: str
+    phone_bridge_port: int
+    phone_bridge_token: str
+    phone_notify_chat_ids: frozenset[int]
 
     @property
     def claude_binary(self) -> str:
@@ -120,6 +125,11 @@ class AppConfig:
         )
         if message_limit > 4096:
             raise ConfigError("TELEGRAM_MAX_MESSAGE_CHARS must be <= 4096")
+
+        phone_bridge_enabled = _parse_bool(source, "PHONE_BRIDGE_ENABLED", False)
+        phone_bridge_token = source.get("PHONE_BRIDGE_TOKEN", "").strip()
+        if phone_bridge_enabled and not phone_bridge_token:
+            raise ConfigError("PHONE_BRIDGE_TOKEN is required when PHONE_BRIDGE_ENABLED=true")
 
         return cls(
             telegram_bot_token=token,
@@ -184,6 +194,16 @@ class AppConfig:
             ),
             claude_capture_lines=_parse_int(
                 source, "CLAUDE_CAPTURE_LINES", 2000, minimum=200
+            ),
+            phone_bridge_enabled=phone_bridge_enabled,
+            phone_bridge_host=source.get("PHONE_BRIDGE_HOST", "0.0.0.0").strip()
+            or "0.0.0.0",
+            phone_bridge_port=_parse_int(
+                source, "PHONE_BRIDGE_PORT", 8765, minimum=1
+            ),
+            phone_bridge_token=phone_bridge_token,
+            phone_notify_chat_ids=_parse_chat_ids(
+                source.get("PHONE_NOTIFY_CHAT_IDS", "")
             ),
         )
 

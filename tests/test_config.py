@@ -24,6 +24,9 @@ class ConfigTests(unittest.TestCase):
 
         self.assertIn("HTTPS_PROXY", config.claude_forward_env_vars)
         self.assertIn("http_proxy", config.claude_forward_env_vars)
+        self.assertFalse(config.phone_bridge_enabled)
+        self.assertEqual(config.phone_bridge_host, "0.0.0.0")
+        self.assertEqual(config.phone_bridge_port, 8765)
 
     def test_rejects_invalid_forward_env_name(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -33,6 +36,34 @@ class ConfigTests(unittest.TestCase):
 
             with self.assertRaises(ConfigError):
                 AppConfig.from_env(env, cwd=path)
+
+    def test_phone_bridge_requires_token_when_enabled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp)
+            env = self.make_base_env(path)
+            env["PHONE_BRIDGE_ENABLED"] = "true"
+
+            with self.assertRaises(ConfigError):
+                AppConfig.from_env(env, cwd=path)
+
+    def test_phone_bridge_parses_notify_chat_ids(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp)
+            env = self.make_base_env(path)
+            env.update(
+                {
+                    "PHONE_BRIDGE_ENABLED": "true",
+                    "PHONE_BRIDGE_TOKEN": "secret",
+                    "PHONE_BRIDGE_PORT": "9001",
+                    "PHONE_NOTIFY_CHAT_IDS": "42,43",
+                }
+            )
+            config = AppConfig.from_env(env, cwd=path)
+
+        self.assertTrue(config.phone_bridge_enabled)
+        self.assertEqual(config.phone_bridge_token, "secret")
+        self.assertEqual(config.phone_bridge_port, 9001)
+        self.assertEqual(config.phone_notify_chat_ids, frozenset({42, 43}))
 
 
 if __name__ == "__main__":

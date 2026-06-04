@@ -6,6 +6,7 @@ from pathlib import Path
 
 from spica_agent.app import BridgeApp
 from spica_agent.config import AppConfig
+from spica_agent.phone import PhoneStateStore
 from spica_agent.telegram import TelegramMessage
 from spica_agent.worker import WorkerStatus
 
@@ -149,6 +150,46 @@ class AppTests(unittest.TestCase):
 
         self.assertEqual(offset, 12)
         self.assertEqual(telegram.get_updates_calls, [(None, 0), (12, 0)])
+
+    def test_phone_command_reports_disabled_when_no_store(self) -> None:
+        telegram = FakeTelegram()
+        app = BridgeApp(self.make_config("42"), telegram, FakeWorker())
+
+        app.handle_message(TelegramMessage(1, 42, 7, "/phone"))
+
+        self.assertIn("未启用", telegram.sent[-1][1])
+
+    def test_phone_command_reports_latest_status(self) -> None:
+        telegram = FakeTelegram()
+        store = PhoneStateStore()
+        store.process_payload(
+            {
+                "device_id": "device-1",
+                "events": [
+                    {
+                        "event_id": "event-1",
+                        "occurred_at_ms": 1_700_000_000_000,
+                        "collected_at_ms": 1_700_000_000_000,
+                        "type": "status",
+                        "snapshot": {
+                            "manufacturer": "Google",
+                            "model": "Pixel",
+                            "battery_percent": 88,
+                            "is_charging": True,
+                            "network_type": "wifi",
+                            "usage_access_granted": True,
+                        },
+                    }
+                ],
+            },
+            now_ms=1_700_000_000_000,
+        )
+        app = BridgeApp(self.make_config("42"), telegram, FakeWorker(), store)
+
+        app.handle_message(TelegramMessage(1, 42, 7, "/phone"))
+
+        self.assertIn("Google Pixel", telegram.sent[-1][1])
+        self.assertIn("88%", telegram.sent[-1][1])
 
 
 if __name__ == "__main__":
