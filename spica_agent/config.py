@@ -64,6 +64,43 @@ def _parse_bool(env: Mapping[str, str], name: str, default: bool) -> bool:
     raise ConfigError(f"{name} must be true or false")
 
 
+def _parse_extensions(raw: str) -> frozenset[str]:
+    extensions: set[str] = set()
+    for part in raw.replace(";", ",").split(","):
+        value = part.strip().lower()
+        if not value:
+            continue
+        if not value.startswith(".") or "/" in value or "\\" in value:
+            raise ConfigError("SPICA_FILE_ALLOWED_EXTENSIONS contains an invalid extension")
+        extensions.add(value)
+    if not extensions:
+        raise ConfigError("SPICA_FILE_ALLOWED_EXTENSIONS must not be empty")
+    return frozenset(extensions)
+
+
+def _parse_paths(raw: str) -> tuple[Path, ...]:
+    paths: list[Path] = []
+    seen: set[Path] = set()
+    for part in raw.replace(";", ",").split(","):
+        value = part.strip()
+        if not value:
+            continue
+        path = Path(value).expanduser().resolve()
+        if path not in seen:
+            paths.append(path)
+            seen.add(path)
+    return tuple(paths)
+
+
+def _parse_strings(raw: str) -> frozenset[str]:
+    values: set[str] = set()
+    for part in raw.replace(";", ",").split(","):
+        value = part.strip()
+        if value:
+            values.add(value)
+    return frozenset(values)
+
+
 @dataclass(frozen=True)
 class AppConfig:
     telegram_bot_token: str
@@ -89,6 +126,18 @@ class AppConfig:
     phone_bridge_port: int
     phone_bridge_token: str
     phone_notify_chat_ids: frozenset[int]
+    spica_files_enabled: bool
+    spica_file_root: Path
+    spica_file_output_roots: tuple[Path, ...]
+    spica_file_allowed_extensions: frozenset[str]
+    spica_file_max_upload_mb: int
+    schedule_bridge_enabled: bool
+    schedule_bridge_token: str
+    schedule_state_file: Path
+    schedule_stateshare_file: Path | None
+    schedule_non_work_packages: frozenset[str]
+    schedule_non_work_threshold_minutes: int
+    schedule_reminder_cooldown_minutes: int
 
     @property
     def claude_binary(self) -> str:
@@ -131,6 +180,24 @@ class AppConfig:
         if phone_bridge_enabled and not phone_bridge_token:
             raise ConfigError("PHONE_BRIDGE_TOKEN is required when PHONE_BRIDGE_ENABLED=true")
 
+        schedule_bridge_enabled = _parse_bool(source, "SCHEDULE_BRIDGE_ENABLED", False)
+        schedule_bridge_token = source.get("SCHEDULE_BRIDGE_TOKEN", phone_bridge_token).strip()
+        if schedule_bridge_enabled and not schedule_bridge_token:
+            raise ConfigError(
+                "SCHEDULE_BRIDGE_TOKEN or PHONE_BRIDGE_TOKEN is required when "
+                "SCHEDULE_BRIDGE_ENABLED=true"
+            )
+
+        claude_workdir = Path(
+            source.get("CLAUDE_WORKDIR", str(current_dir))
+        ).expanduser().resolve()
+        file_root = Path(source.get("SPICA_FILE_ROOT", "/tmp/spica-agent")).expanduser().resolve()
+        output_roots_raw = source.get(
+            "SPICA_FILE_OUTPUT_ROOTS",
+            f"{claude_workdir},{file_root / 'outputs'}",
+        )
+        state_share_raw = source.get("SCHEDULE_STATESHARE_FILE", "").strip()
+
         return cls(
             telegram_bot_token=token,
             telegram_allowed_chat_ids=_parse_chat_ids(
@@ -147,11 +214,7 @@ class AppConfig:
             telegram_max_reply_chars=_parse_int(
                 source, "TELEGRAM_MAX_REPLY_CHARS", 60000, minimum=1000
             ),
-            claude_workdir=Path(
-                source.get("CLAUDE_WORKDIR", str(current_dir))
-            )
-            .expanduser()
-            .resolve(),
+            claude_workdir=claude_workdir,
             claude_tmux_session=source.get("CLAUDE_TMUX_SESSION", "claude_bg").strip()
             or "claude_bg",
             claude_command=command,
@@ -204,6 +267,37 @@ class AppConfig:
             phone_bridge_token=phone_bridge_token,
             phone_notify_chat_ids=_parse_chat_ids(
                 source.get("PHONE_NOTIFY_CHAT_IDS", "")
+            ),
+            spica_files_enabled=_parse_bool(source, "SPICA_FILES_ENABLED", False),
+            spica_file_root=file_root,
+            spica_file_output_roots=_parse_paths(output_roots_raw),
+            spica_file_allowed_extensions=_parse_extensions(
+                source.get(
+                    "SPICA_FILE_ALLOWED_EXTENSIONS",
+                    ".png,.jpg,.jpeg,.webp,.gif,.pdf,.txt,.md,.zip",
+                )
+            ),
+            spica_file_max_upload_mb=_parse_int(
+                source, "SPICA_FILE_MAX_UPLOAD_MB", 50, minimum=1
+            ),
+            schedule_bridge_enabled=schedule_bridge_enabled,
+            schedule_bridge_token=schedule_bridge_token,
+            schedule_state_file=Path(
+                source.get("SCHEDULE_STATE_FILE", "/tmp/spica-agent/schedule-state.json")
+            )
+            .expanduser()
+            .resolve(),
+            schedule_stateshare_file=(
+                Path(state_share_raw).expanduser().resolve() if state_share_raw else None
+            ),
+            schedule_non_work_packages=_parse_strings(
+                source.get("SCHEDULE_NON_WORK_PACKAGES", "")
+            ),
+            schedule_non_work_threshold_minutes=_parse_int(
+                source, "SCHEDULE_NON_WORK_THRESHOLD_MINUTES", 20, minimum=1
+            ),
+            schedule_reminder_cooldown_minutes=_parse_int(
+                source, "SCHEDULE_REMINDER_COOLDOWN_MINUTES", 120, minimum=1
             ),
         )
 

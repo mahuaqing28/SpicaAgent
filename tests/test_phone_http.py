@@ -7,6 +7,7 @@ import unittest
 
 from spica_agent.phone import PhoneStateStore
 from spica_agent.phone_http import PhoneHttpServer
+from spica_agent.schedule import ScheduleReminder, ScheduleStateStore
 
 
 class FakeTelegram:
@@ -21,6 +22,11 @@ class PhoneHttpServerTests(unittest.TestCase):
     def setUp(self) -> None:
         self.telegram = FakeTelegram()
         self.store = PhoneStateStore()
+        self.schedule_store = ScheduleStateStore(
+            non_work_packages=frozenset({"com.video"}),
+            non_work_threshold_minutes=20,
+        )
+        self.schedule_callbacks: list[tuple[int, ScheduleReminder]] = []
         self.server = PhoneHttpServer(
             host="127.0.0.1",
             port=0,
@@ -28,6 +34,11 @@ class PhoneHttpServerTests(unittest.TestCase):
             store=self.store,
             telegram=self.telegram,
             notify_chat_ids=frozenset({42}),
+            schedule_store=self.schedule_store,
+            schedule_token="schedule-secret",
+            schedule_reminder_callback=lambda chat_id, reminder: self.schedule_callbacks.append(
+                (chat_id, reminder)
+            ),
         )
         self.server.start()
         self.host, self.port = self.server.server_address
@@ -35,17 +46,40 @@ class PhoneHttpServerTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.server.stop()
 
-    def post(self, payload: dict, *, token: str = "secret") -> tuple[int, dict]:
+    def post(
+        self,
+        payload: dict,
+        *,
+        token: str = "secret",
+        path: str = "/api/phone/events",
+    ) -> tuple[int, dict]:
         connection = http.client.HTTPConnection(self.host, self.port, timeout=5)
         body = json.dumps(payload)
         connection.request(
             "POST",
-            "/api/phone/events",
+            path,
             body=body,
             headers={
                 "Content-Type": "application/json",
                 "Authorization": f"Bearer {token}",
             },
+        )
+        response = connection.getresponse()
+        raw = response.read().decode("utf-8")
+        connection.close()
+        return response.status, json.loads(raw)
+
+    def get(
+        self,
+        path: str,
+        *,
+        token: str = "schedule-secret",
+    ) -> tuple[int, dict]:
+        connection = http.client.HTTPConnection(self.host, self.port, timeout=5)
+        connection.request(
+            "GET",
+            path,
+            headers={"Authorization": f"Bearer {token}"},
         )
         response = connection.getresponse()
         raw = response.read().decode("utf-8")
@@ -88,6 +122,148 @@ class PhoneHttpServerTests(unittest.TestCase):
         status, data = self.post({"device_id": "device-1"})
 
         self.assertEqual(status, 400)
+        self.assertFalse(data["ok"])
+
+    def test_accepts_schedule_snapshot_and_invokes_reminder_callback(self) -> None:
+        now_ms = int(time.time() * 1000)
+        status, data = self.post(
+            {
+                "device_id": "device-1",
+                "today": "2026-06-04",
+                "tasks": [
+                    {
+                        "id": "task-1",
+                        "title": "写项目报告",
+                        "deadline_ms": now_ms + 60 * 60 * 1000,
+                        "priority": 5,
+                        "is_completed": False,
+                    }
+                ],
+                "phone_status": {
+                    "recent_apps": [
+                        {
+                            "package_name": "com.video",
+                            "app_name": "Video",
+                            "total_time_ms": 25 * 60 * 1000,
+                        }
+                    ]
+                },
+            },
+            path="/api/schedule/snapshot",
+            token="schedule-secret",
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(data["accepted_task_ids"], ["task-1"])
+        self.assertEqual(data["reminder_count"], 1)
+        self.assertEqual(self.schedule_callbacks[0][0], 42)
+        self.assertIn("写项目报告", self.schedule_callbacks[0][1].agent_prompt)
+
+    def test_schedule_uses_separate_token(self) -> None:
+        status, data = self.post(
+            {"tasks": []},
+            path="/api/schedule/snapshot",
+            token="secret",
+        )
+
+        self.assertEqual(status, 401)
+        self.assertFalse(data["ok"])
+
+    def test_accepts_schedule_changes(self) -> None:
+        status, data = self.post(
+            {
+                "changed_tasks": [
+                    {
+                        "id": "task-1",
+                        "title": "写项目报告",
+                        "is_completed": True,
+                    }
+                ]
+            },
+            path="/api/schedule/changes",
+            token="schedule-secret",
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(data["accepted_task_ids"], ["task-1"])
+
+    def test_schedule_status_get_returns_private_current_state(self) -> None:
+        now_ms = int(time.time() * 1000)
+        self.schedule_store.process_snapshot(
+            {
+                "device_id": "device-1",
+                "today": "2026-06-04",
+                "sent_at_ms": now_ms,
+                "tasks": [
+                    {
+                        "id": "task-1",
+                        "title": "写项目报告",
+                        "deadline_ms": now_ms + 60 * 60 * 1000,
+                        "priority": 5,
+                        "is_completed": False,
+                    }
+                ],
+                "phone_status": {
+                    "recent_apps": [
+                        {
+                            "package_name": "com.video",
+                            "app_name": "Video",
+                            "total_time_ms": 25 * 60 * 1000,
+                        }
+                    ]
+                },
+            },
+            now_ms=now_ms,
+        )
+
+        status, data = self.get("/api/schedule/status")
+
+        self.assertEqual(status, 200)
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["data"]["progress"]["total"], 1)
+        self.assertEqual(
+            data["data"]["phone_status"]["recent_apps"][0]["package_name"],
+            "com.video",
+        )
+
+    def test_schedule_stateshare_get_returns_public_payload(self) -> None:
+        now_ms = int(time.time() * 1000)
+        self.schedule_store.process_snapshot(
+            {
+                "device_id": "device-1",
+                "today": "2026-06-04",
+                "tasks": [
+                    {
+                        "id": "task-1",
+                        "title": "写项目报告",
+                        "deadline_ms": now_ms + 60 * 60 * 1000,
+                        "priority": 5,
+                        "is_completed": False,
+                    }
+                ],
+                "phone_status": {
+                    "recent_apps": [
+                        {
+                            "package_name": "com.video",
+                            "app_name": "Video",
+                            "total_time_ms": 25 * 60 * 1000,
+                        }
+                    ]
+                },
+            },
+            now_ms=now_ms,
+        )
+
+        status, data = self.get("/api/schedule/stateshare")
+
+        self.assertEqual(status, 200)
+        self.assertEqual(data["data"]["schedule"][0]["title"], "写项目报告")
+        self.assertNotIn("com.video", json.dumps(data["data"], ensure_ascii=False))
+
+    def test_schedule_get_requires_token(self) -> None:
+        status, data = self.get("/api/schedule/status", token="bad")
+
+        self.assertEqual(status, 401)
         self.assertFalse(data["ok"])
 
 

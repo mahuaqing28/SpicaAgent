@@ -65,6 +65,45 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.phone_bridge_port, 9001)
         self.assertEqual(config.phone_notify_chat_ids, frozenset({42, 43}))
 
+    def test_schedule_bridge_requires_token_when_enabled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp)
+            env = self.make_base_env(path)
+            env["SCHEDULE_BRIDGE_ENABLED"] = "true"
+
+            with self.assertRaises(ConfigError):
+                AppConfig.from_env(env, cwd=path)
+
+    def test_schedule_bridge_parses_config_and_reuses_phone_token(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp)
+            state_file = path / "schedule.json"
+            share_file = path / "status.json"
+            env = self.make_base_env(path)
+            env.update(
+                {
+                    "PHONE_BRIDGE_TOKEN": "shared-secret",
+                    "SCHEDULE_BRIDGE_ENABLED": "true",
+                    "SCHEDULE_STATE_FILE": str(state_file),
+                    "SCHEDULE_STATESHARE_FILE": str(share_file),
+                    "SCHEDULE_NON_WORK_PACKAGES": "com.video,com.social",
+                    "SCHEDULE_NON_WORK_THRESHOLD_MINUTES": "15",
+                    "SCHEDULE_REMINDER_COOLDOWN_MINUTES": "45",
+                }
+            )
+            config = AppConfig.from_env(env, cwd=path)
+
+        self.assertTrue(config.schedule_bridge_enabled)
+        self.assertEqual(config.schedule_bridge_token, "shared-secret")
+        self.assertEqual(config.schedule_state_file, state_file.resolve())
+        self.assertEqual(config.schedule_stateshare_file, share_file.resolve())
+        self.assertEqual(
+            config.schedule_non_work_packages,
+            frozenset({"com.video", "com.social"}),
+        )
+        self.assertEqual(config.schedule_non_work_threshold_minutes, 15)
+        self.assertEqual(config.schedule_reminder_cooldown_minutes, 45)
+
 
 if __name__ == "__main__":
     unittest.main()
