@@ -594,6 +594,10 @@ def main() -> int:
         schedule_store = ScheduleStateStore(
             state_file=config.schedule_state_file,
             state_share_file=config.schedule_stateshare_file,
+            state_share_owner=config.schedule_stateshare_owner,
+            state_share_default_tagline=config.schedule_stateshare_default_tagline,
+            state_share_default_funny_status=config.schedule_stateshare_default_funny_status,
+            state_share_default_bgm=config.schedule_stateshare_default_bgm,
             non_work_packages=config.schedule_non_work_packages,
             non_work_threshold_minutes=config.schedule_non_work_threshold_minutes,
             reminder_cooldown_minutes=config.schedule_reminder_cooldown_minutes,

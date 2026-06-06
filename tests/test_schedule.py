@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
 
 from spica_agent.schedule import SchedulePayloadError, ScheduleStateStore
@@ -223,6 +224,7 @@ class ScheduleStateStoreTests(unittest.TestCase):
             store = ScheduleStateStore(
                 state_file=state_file,
                 state_share_file=share_file,
+                state_share_owner="2049",
                 non_work_packages=frozenset({"com.video"}),
             )
 
@@ -235,7 +237,20 @@ class ScheduleStateStoreTests(unittest.TestCase):
                         task("1", "写项目报告", is_completed=True),
                         task("2", "跑步", priority=2),
                     ],
-                    "schedules": [],
+                    "schedules": [
+                        schedule(
+                            "s2",
+                            "2",
+                            schedule_type="TIME_BLOCK",
+                            start_time_ms=NOW,
+                            end_time_ms=NOW + 30 * 60 * 1000,
+                        )
+                    ],
+                    "state_share": {
+                        "tagline": "今日主线在线",
+                        "funny_status": "状态稳定",
+                        "today_bgm": "Night Drive",
+                    },
                     "phone_status": phone_status(),
                 },
                 now_ms=NOW,
@@ -243,12 +258,36 @@ class ScheduleStateStoreTests(unittest.TestCase):
 
             self.assertTrue(state_file.is_file())
             share = json.loads(share_file.read_text(encoding="utf-8"))
-            self.assertEqual(share["progress"], 50)
-            self.assertEqual(len(share["schedule"]), 2)
+            expected_start = datetime.fromtimestamp(NOW / 1000).strftime("%H:%M")
+            expected_end = datetime.fromtimestamp((NOW + 30 * 60 * 1000) / 1000).strftime(
+                "%H:%M"
+            )
+            self.assertEqual(share["owner"], "2049")
+            self.assertEqual(share["tagline"], "今日主线在线")
+            self.assertEqual(share["funnyStatus"], "状态稳定")
+            self.assertEqual(share["today_bgm"], "Night Drive")
+            self.assertEqual(
+                share["schedule"],
+                [
+                    {
+                        "date": "2023-11-14",
+                        "title": "跑步",
+                        "type": "TIME_BLOCK",
+                        "start_time": expected_start,
+                        "end_time": expected_end,
+                    }
+                ],
+            )
+            self.assertNotIn("progress", share)
+            self.assertNotIn("energy", share)
+            self.assertNotIn("focus", share)
+            self.assertNotIn("status", json.dumps(share, ensure_ascii=False))
+            self.assertNotIn("note", json.dumps(share, ensure_ascii=False))
             self.assertNotIn("com.video", json.dumps(share, ensure_ascii=False))
 
             loaded = ScheduleStateStore(state_file=state_file)
             self.assertIn("写项目报告", loaded.format_status())
+            self.assertEqual(loaded.state_share_payload(now_ms=NOW)["today_bgm"], "Night Drive")
 
     def test_status_payload_contains_private_state_and_public_payload_hides_packages(self) -> None:
         store = ScheduleStateStore(non_work_packages=frozenset({"com.video"}))
@@ -261,7 +300,7 @@ class ScheduleStateStoreTests(unittest.TestCase):
                     task("1", "写项目报告", is_completed=True),
                     task("2", "跑步", priority=2),
                 ],
-                "schedules": [],
+                "schedules": [schedule("s2", "2")],
                 "phone_status": phone_status(),
             },
             now_ms=NOW,
@@ -274,7 +313,10 @@ class ScheduleStateStoreTests(unittest.TestCase):
         self.assertEqual(private["phone_status"]["recent_apps"][0]["package_name"], "com.video")
         self.assertIn("写项目报告", [item["title"] for item in private["tasks"]])
         self.assertIn("跑步", private["summary"])
-        self.assertEqual(public["progress"], 50)
+        self.assertEqual(public["owner"], "2049")
+        self.assertEqual(public["schedule"][0]["title"], "跑步")
+        self.assertEqual(public["schedule"][0]["type"], "FLOATING")
+        self.assertNotIn("progress", public)
         self.assertNotIn("com.video", json.dumps(public, ensure_ascii=False))
 
     def test_changes_update_existing_task(self) -> None:
@@ -366,11 +408,61 @@ class ScheduleStateStoreTests(unittest.TestCase):
         self.assertEqual(result.accepted_schedule_ids, [])
         self.assertIn("进度: 1/1", store.format_status())
 
+    def test_changes_can_update_and_preserve_state_share_metadata(self) -> None:
+        store = ScheduleStateStore()
+        store.process_snapshot(
+            {
+                "today": "2023-11-14",
+                "tasks": [task("1", "写项目报告", is_completed=False)],
+                "schedules": [schedule("1", "1")],
+                "state_share": {
+                    "tagline": "旧主线",
+                    "funny_status": "旧状态",
+                    "today_bgm": "旧 BGM",
+                },
+            },
+            now_ms=NOW,
+        )
+
+        store.process_changes(
+            {
+                "changed_tasks": [task("1", "写项目报告", is_completed=True)],
+                "changed_schedules": [],
+                "state_share": {"tagline": "新主线", "today_bgm": "新 BGM"},
+            },
+            now_ms=NOW + 1000,
+        )
+        updated = store.state_share_payload(now_ms=NOW + 1000)
+        self.assertEqual(updated["tagline"], "新主线")
+        self.assertEqual(updated["funnyStatus"], "")
+        self.assertEqual(updated["today_bgm"], "新 BGM")
+
+        store.process_changes(
+            {
+                "changed_tasks": [task("1", "写项目报告", is_completed=False)],
+                "changed_schedules": [],
+            },
+            now_ms=NOW + 2000,
+        )
+        preserved = store.state_share_payload(now_ms=NOW + 2000)
+        self.assertEqual(preserved["tagline"], "新主线")
+        self.assertEqual(preserved["today_bgm"], "新 BGM")
+
     def test_rejects_bad_payload(self) -> None:
         store = ScheduleStateStore()
 
         with self.assertRaises(SchedulePayloadError):
             store.process_snapshot({"tasks": [{"id": "1"}], "schedules": []}, now_ms=NOW)
+
+        with self.assertRaises(SchedulePayloadError):
+            store.process_snapshot(
+                {
+                    "tasks": [task("1", "写项目报告")],
+                    "schedules": [],
+                    "state_share": "bad",
+                },
+                now_ms=NOW,
+            )
 
 
 if __name__ == "__main__":

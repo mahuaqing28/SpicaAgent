@@ -10,6 +10,7 @@ from typing import Any
 
 
 DAY_MS = 24 * 60 * 60 * 1000
+STATE_SHARE_TEXT_MAX_CHARS = 120
 
 
 class SchedulePayloadError(ValueError):
@@ -83,12 +84,23 @@ class ScheduleEntry:
         return target_ms - max(self.reminder_minutes_before, 0) * 60 * 1000
 
 
+@dataclass(frozen=True)
+class StateShareMetadata:
+    tagline: str = ""
+    funny_status: str = ""
+    today_bgm: str = ""
+
+
 class ScheduleStateStore:
     def __init__(
         self,
         *,
         state_file: Path | None = None,
         state_share_file: Path | None = None,
+        state_share_owner: str = "2049",
+        state_share_default_tagline: str = "",
+        state_share_default_funny_status: str = "",
+        state_share_default_bgm: str = "",
         non_work_packages: frozenset[str] = frozenset(),
         non_work_threshold_minutes: int = 20,
         reminder_cooldown_minutes: int = 120,
@@ -100,6 +112,10 @@ class ScheduleStateStore:
         self._state_share_file = (
             state_share_file.expanduser().resolve() if state_share_file else None
         )
+        self._state_share_owner = state_share_owner.strip() or "2049"
+        self._state_share_default_tagline = state_share_default_tagline.strip()
+        self._state_share_default_funny_status = state_share_default_funny_status.strip()
+        self._state_share_default_bgm = state_share_default_bgm.strip()
         self._agent_schedule_dir = (
             agent_schedule_dir.expanduser().resolve() if agent_schedule_dir else None
         )
@@ -115,6 +131,7 @@ class ScheduleStateStore:
         self._today = ""
         self._updated_at_ms = 0
         self._phone_updated_at_ms = 0
+        self._state_share_metadata = StateShareMetadata()
         self._reminder_at: dict[str, int] = {}
         self._load()
 
@@ -125,6 +142,7 @@ class ScheduleStateStore:
         tasks = [_parse_task(item) for item in _required_list(payload, "tasks")]
         schedules = _parse_schedules(_required_list(payload, "schedules"), tasks)
         phone_status = _optional_object(payload.get("phone_status"))
+        state_share_metadata = _parse_state_share_metadata(payload)
         device_id = str(payload.get("device_id") or self._device_id or "").strip()
         timezone_name = str(payload.get("timezone") or self._timezone or "Asia/Shanghai")
         today = str(payload.get("today") or _date_label(now))
@@ -140,6 +158,8 @@ class ScheduleStateStore:
             self._timezone = timezone_name
             self._today = today
             self._updated_at_ms = sent_at_ms
+            if state_share_metadata is not None:
+                self._state_share_metadata = state_share_metadata
             self._write_agent_files_locked(now)
             reminders = self._reminders_for_locked(now)
             self._save_locked()
@@ -162,6 +182,7 @@ class ScheduleStateStore:
             list(self._tasks.values()) + changed_tasks,
         )
         phone_status = _optional_object(payload.get("phone_status"))
+        state_share_metadata = _parse_state_share_metadata(payload)
         timezone_name = str(payload.get("timezone") or self._timezone or "Asia/Shanghai")
         today = str(payload.get("today") or self._today or _date_label(now))
         sent_at_ms = _optional_int(payload.get("sent_at_ms")) or now
@@ -187,6 +208,8 @@ class ScheduleStateStore:
             self._timezone = timezone_name
             self._today = today
             self._updated_at_ms = sent_at_ms
+            if state_share_metadata is not None:
+                self._state_share_metadata = state_share_metadata
             self._write_agent_files_locked(now)
             reminders = self._reminders_for_locked(now)
             self._save_locked()
@@ -402,6 +425,13 @@ class ScheduleStateStore:
         self._today = str(data.get("today") or "")
         self._updated_at_ms = _optional_int(data.get("updated_at_ms")) or 0
         self._phone_updated_at_ms = _optional_int(data.get("phone_updated_at_ms")) or 0
+        try:
+            self._state_share_metadata = (
+                _parse_state_share_metadata(data, preserve_missing=True)
+                or StateShareMetadata()
+            )
+        except SchedulePayloadError:
+            self._state_share_metadata = StateShareMetadata()
         reminder_at = data.get("reminder_at")
         if isinstance(reminder_at, dict):
             self._reminder_at = {
@@ -421,6 +451,7 @@ class ScheduleStateStore:
             "updated_at_ms": self._updated_at_ms,
             "phone_updated_at_ms": self._phone_updated_at_ms,
             "phone_status": self._phone_status,
+            "state_share": _state_share_metadata_to_json(self._state_share_metadata),
             "tasks": [_task_to_json(task) for task in self._tasks.values()],
             "schedules": [_schedule_to_json(schedule) for schedule in self._schedules.values()],
             "reminder_at": self._reminder_at,
@@ -614,34 +645,21 @@ class ScheduleStateStore:
         return "\n".join(lines)
 
     def _state_share_payload_locked(self, now_ms: int) -> dict[str, Any]:
-        items = self._display_items_locked()
-        total = len(items)
-        done = sum(1 for item in items if item.status == "done")
-        progress = int(done * 100 / total) if total else 0
         schedule = [
-            {
-                "time": _item_time_label(item),
-                "title": item.title,
-                "note": item.description,
-                "status": item.status,
-            }
-            for item in items
-            if (
-                item.deadline_ms is not None
-                or (isinstance(item, ScheduleEntry) and item.start_time_ms is not None)
-                or item.status != "done"
-            )
-        ][:12]
+            _state_share_schedule_to_json(entry)
+            for entry in self._sorted_schedules_locked()
+            if not self._today or entry.date == self._today
+        ]
+        metadata = self._state_share_metadata
         payload = {
-            "owner": "mahuaqing",
+            "owner": self._state_share_owner,
             "today": self._today or _date_label(now_ms),
-            "tagline": "当前状态由 Spica 云端 bridge 自动同步。",
             "updatedAt": _format_time(self._updated_at_ms or now_ms),
-            "energy": _energy_percent(self._phone_status),
-            "focus": _focus_percent(self._phone_status, self._non_work_packages),
-            "progress": progress,
-            "funnyStatus": _public_funny_status(done, total),
-            "progressNote": f"今日已完成 {done}/{total} 项。",
+            "tagline": metadata.tagline or self._state_share_default_tagline,
+            "funnyStatus": (
+                metadata.funny_status or self._state_share_default_funny_status
+            ),
+            "today_bgm": metadata.today_bgm or self._state_share_default_bgm,
             "schedule": schedule,
         }
         return payload
@@ -795,6 +813,60 @@ def _schedule_to_json(schedule: ScheduleEntry) -> dict[str, Any]:
         "priority": schedule.priority,
         "reminder_enabled": schedule.reminder_enabled,
         "reminder_minutes_before": schedule.reminder_minutes_before,
+    }
+
+
+def _state_share_schedule_to_json(schedule: ScheduleEntry) -> dict[str, Any]:
+    payload = {
+        "date": schedule.date,
+        "title": schedule.title,
+        "type": schedule.type,
+    }
+    if schedule.start_time_ms is not None:
+        payload["start_time"] = _time_label(schedule.start_time_ms)
+    if schedule.end_time_ms is not None:
+        payload["end_time"] = _time_label(schedule.end_time_ms)
+    return payload
+
+
+def _parse_state_share_metadata(
+    payload: dict[str, Any], *, preserve_missing: bool = False
+) -> StateShareMetadata | None:
+    if "state_share" not in payload:
+        return None if preserve_missing else None
+    raw = payload.get("state_share")
+    if raw is None:
+        return StateShareMetadata()
+    if not isinstance(raw, dict):
+        raise SchedulePayloadError("state_share must be an object")
+    funny_raw = raw.get("funny_status")
+    if funny_raw is None and "funnyStatus" in raw:
+        funny_raw = raw.get("funnyStatus")
+    return StateShareMetadata(
+        tagline=_state_share_text(raw.get("tagline"), "tagline"),
+        funny_status=_state_share_text(funny_raw, "funny_status"),
+        today_bgm=_state_share_text(raw.get("today_bgm"), "today_bgm"),
+    )
+
+
+def _state_share_text(value: Any, field_name: str) -> str:
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        raise SchedulePayloadError(f"state_share.{field_name} must be a string")
+    text = value.strip()
+    if len(text) > STATE_SHARE_TEXT_MAX_CHARS:
+        raise SchedulePayloadError(
+            f"state_share.{field_name} must be <= {STATE_SHARE_TEXT_MAX_CHARS} chars"
+        )
+    return text
+
+
+def _state_share_metadata_to_json(metadata: StateShareMetadata) -> dict[str, str]:
+    return {
+        "tagline": metadata.tagline,
+        "funny_status": metadata.funny_status,
+        "today_bgm": metadata.today_bgm,
     }
 
 

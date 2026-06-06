@@ -135,6 +135,10 @@ class AppConfig:
     schedule_bridge_token: str
     schedule_state_file: Path
     schedule_stateshare_file: Path | None
+    schedule_stateshare_owner: str
+    schedule_stateshare_default_tagline: str
+    schedule_stateshare_default_funny_status: str
+    schedule_stateshare_default_bgm: str
     schedule_agent_dir: Path
     schedule_agent_history_days: int
     schedule_non_work_packages: frozenset[str]
@@ -293,6 +297,17 @@ class AppConfig:
             schedule_stateshare_file=(
                 Path(state_share_raw).expanduser().resolve() if state_share_raw else None
             ),
+            schedule_stateshare_owner=source.get("SCHEDULE_STATESHARE_OWNER", "2049").strip()
+            or "2049",
+            schedule_stateshare_default_tagline=source.get(
+                "SCHEDULE_STATESHARE_DEFAULT_TAGLINE", ""
+            ).strip(),
+            schedule_stateshare_default_funny_status=source.get(
+                "SCHEDULE_STATESHARE_DEFAULT_FUNNY_STATUS", ""
+            ).strip(),
+            schedule_stateshare_default_bgm=source.get(
+                "SCHEDULE_STATESHARE_DEFAULT_BGM", ""
+            ).strip(),
             schedule_agent_dir=Path(
                 source.get("SCHEDULE_AGENT_DIR", str(claude_workdir / "schedule"))
             )

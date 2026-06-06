@@ -87,6 +87,10 @@ class ConfigTests(unittest.TestCase):
                     "SCHEDULE_BRIDGE_ENABLED": "true",
                     "SCHEDULE_STATE_FILE": str(state_file),
                     "SCHEDULE_STATESHARE_FILE": str(share_file),
+                    "SCHEDULE_STATESHARE_OWNER": "2049",
+                    "SCHEDULE_STATESHARE_DEFAULT_TAGLINE": "今日主线在线",
+                    "SCHEDULE_STATESHARE_DEFAULT_FUNNY_STATUS": "状态稳定",
+                    "SCHEDULE_STATESHARE_DEFAULT_BGM": "Night Drive",
                     "SCHEDULE_AGENT_DIR": str(agent_dir),
                     "SCHEDULE_AGENT_HISTORY_DAYS": "5",
                     "SCHEDULE_NON_WORK_PACKAGES": "com.video,com.social",
@@ -101,6 +105,10 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.schedule_bridge_token, "shared-secret")
         self.assertEqual(config.schedule_state_file, state_file.resolve())
         self.assertEqual(config.schedule_stateshare_file, share_file.resolve())
+        self.assertEqual(config.schedule_stateshare_owner, "2049")
+        self.assertEqual(config.schedule_stateshare_default_tagline, "今日主线在线")
+        self.assertEqual(config.schedule_stateshare_default_funny_status, "状态稳定")
+        self.assertEqual(config.schedule_stateshare_default_bgm, "Night Drive")
         self.assertEqual(config.schedule_agent_dir, agent_dir.resolve())
         self.assertEqual(config.schedule_agent_history_days, 5)
         self.assertEqual(

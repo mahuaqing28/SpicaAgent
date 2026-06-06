@@ -276,7 +276,23 @@ class PhoneHttpServerTests(unittest.TestCase):
                 "device_id": "device-1",
                 "today": "2026-06-04",
                 "tasks": [task_payload("task-1", "写项目报告", now_ms)],
-                "schedules": [],
+                "schedules": [
+                    {
+                        "id": "schedule-1",
+                        "task_id": "task-1",
+                        "date": "2026-06-04",
+                        "type": "TIME_BLOCK",
+                        "start_time_ms": now_ms,
+                        "end_time_ms": now_ms + 30 * 60 * 1000,
+                        "reminder_enabled": False,
+                        "reminder_minutes_before": 10,
+                    }
+                ],
+                "state_share": {
+                    "tagline": "今日主线在线",
+                    "funny_status": "状态稳定",
+                    "today_bgm": "Night Drive",
+                },
                 "phone_status": {
                     "recent_apps": [
                         {
@@ -294,6 +310,12 @@ class PhoneHttpServerTests(unittest.TestCase):
 
         self.assertEqual(status, 200)
         self.assertEqual(data["data"]["schedule"][0]["title"], "写项目报告")
+        self.assertEqual(data["data"]["tagline"], "今日主线在线")
+        self.assertEqual(data["data"]["funnyStatus"], "状态稳定")
+        self.assertEqual(data["data"]["today_bgm"], "Night Drive")
+        self.assertNotIn("status", data["data"]["schedule"][0])
+        self.assertNotIn("note", data["data"]["schedule"][0])
+        self.assertNotIn("progress", data["data"])
         self.assertNotIn("com.video", json.dumps(data["data"], ensure_ascii=False))
 
     def test_schedule_get_requires_token(self) -> None:
