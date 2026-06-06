@@ -139,6 +139,12 @@ class AppConfig:
     schedule_stateshare_default_tagline: str
     schedule_stateshare_default_funny_status: str
     schedule_stateshare_default_bgm: str
+    schedule_stateshare_auto_commit: bool
+    schedule_stateshare_repo: Path | None
+    schedule_stateshare_push: bool
+    schedule_stateshare_branch: str
+    schedule_stateshare_remote: str
+    schedule_stateshare_commit_timeout_seconds: int
     schedule_agent_dir: Path
     schedule_agent_history_days: int
     schedule_non_work_packages: frozenset[str]
@@ -204,6 +210,15 @@ class AppConfig:
             f"{claude_workdir},{file_root / 'outputs'}",
         )
         state_share_raw = source.get("SCHEDULE_STATESHARE_FILE", "").strip()
+        state_share_file = (
+            Path(state_share_raw).expanduser().resolve() if state_share_raw else None
+        )
+        state_share_repo_raw = source.get("SCHEDULE_STATESHARE_REPO", "").strip()
+        state_share_repo = (
+            Path(state_share_repo_raw).expanduser().resolve()
+            if state_share_repo_raw
+            else (state_share_file.parent.parent if state_share_file is not None else None)
+        )
 
         return cls(
             telegram_bot_token=token,
@@ -294,9 +309,7 @@ class AppConfig:
             )
             .expanduser()
             .resolve(),
-            schedule_stateshare_file=(
-                Path(state_share_raw).expanduser().resolve() if state_share_raw else None
-            ),
+            schedule_stateshare_file=state_share_file,
             schedule_stateshare_owner=source.get("SCHEDULE_STATESHARE_OWNER", "2049").strip()
             or "2049",
             schedule_stateshare_default_tagline=source.get(
@@ -308,6 +321,24 @@ class AppConfig:
             schedule_stateshare_default_bgm=source.get(
                 "SCHEDULE_STATESHARE_DEFAULT_BGM", ""
             ).strip(),
+            schedule_stateshare_auto_commit=_parse_bool(
+                source, "SCHEDULE_STATESHARE_AUTO_COMMIT", False
+            ),
+            schedule_stateshare_repo=state_share_repo,
+            schedule_stateshare_push=_parse_bool(
+                source, "SCHEDULE_STATESHARE_PUSH", True
+            ),
+            schedule_stateshare_branch=source.get(
+                "SCHEDULE_STATESHARE_BRANCH", "main"
+            ).strip()
+            or "main",
+            schedule_stateshare_remote=source.get(
+                "SCHEDULE_STATESHARE_REMOTE", "origin"
+            ).strip()
+            or "origin",
+            schedule_stateshare_commit_timeout_seconds=_parse_int(
+                source, "SCHEDULE_STATESHARE_COMMIT_TIMEOUT_SECONDS", 30, minimum=1
+            ),
             schedule_agent_dir=Path(
                 source.get("SCHEDULE_AGENT_DIR", str(claude_workdir / "schedule"))
             )

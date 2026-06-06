@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import logging
+import subprocess
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -11,6 +13,7 @@ from typing import Any
 
 DAY_MS = 24 * 60 * 60 * 1000
 STATE_SHARE_TEXT_MAX_CHARS = 120
+LOGGER = logging.getLogger(__name__)
 
 
 class SchedulePayloadError(ValueError):
@@ -101,6 +104,12 @@ class ScheduleStateStore:
         state_share_default_tagline: str = "",
         state_share_default_funny_status: str = "",
         state_share_default_bgm: str = "",
+        state_share_auto_commit: bool = False,
+        state_share_repo: Path | None = None,
+        state_share_push: bool = True,
+        state_share_branch: str = "main",
+        state_share_remote: str = "origin",
+        state_share_commit_timeout_seconds: int = 30,
         non_work_packages: frozenset[str] = frozenset(),
         non_work_threshold_minutes: int = 20,
         reminder_cooldown_minutes: int = 120,
@@ -116,6 +125,16 @@ class ScheduleStateStore:
         self._state_share_default_tagline = state_share_default_tagline.strip()
         self._state_share_default_funny_status = state_share_default_funny_status.strip()
         self._state_share_default_bgm = state_share_default_bgm.strip()
+        self._state_share_auto_commit = state_share_auto_commit
+        self._state_share_repo = (
+            state_share_repo.expanduser().resolve() if state_share_repo else None
+        )
+        self._state_share_push = state_share_push
+        self._state_share_branch = state_share_branch.strip() or "main"
+        self._state_share_remote = state_share_remote.strip() or "origin"
+        self._state_share_commit_timeout_seconds = max(
+            state_share_commit_timeout_seconds, 1
+        )
         self._agent_schedule_dir = (
             agent_schedule_dir.expanduser().resolve() if agent_schedule_dir else None
         )
@@ -606,6 +625,88 @@ class ScheduleStateStore:
             json.dumps(payload, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
+        self._commit_state_share_locked(now_ms)
+
+    def _commit_state_share_locked(self, now_ms: int) -> None:
+        if (
+            not self._state_share_auto_commit
+            or self._state_share_file is None
+            or self._state_share_repo is None
+        ):
+            return
+        repo = self._state_share_repo
+        try:
+            relative_file = self._state_share_file.relative_to(repo)
+        except ValueError:
+            LOGGER.warning(
+                "stateShare file %s is outside repo %s; skipping auto commit",
+                self._state_share_file,
+                repo,
+            )
+            return
+
+        relative = relative_file.as_posix()
+        try:
+            status = _run_git(
+                repo,
+                ["status", "--porcelain", "--", relative],
+                self._state_share_commit_timeout_seconds,
+            )
+            if status.returncode != 0:
+                LOGGER.warning(
+                    "stateShare git status failed: %s",
+                    _git_error_text(status),
+                )
+                return
+            if not status.stdout.strip():
+                return
+
+            add = _run_git(
+                repo,
+                ["add", "--", relative],
+                self._state_share_commit_timeout_seconds,
+            )
+            if add.returncode != 0:
+                LOGGER.warning("stateShare git add failed: %s", _git_error_text(add))
+                return
+
+            diff = _run_git(
+                repo,
+                ["diff", "--cached", "--quiet", "--", relative],
+                self._state_share_commit_timeout_seconds,
+            )
+            if diff.returncode == 0:
+                return
+            if diff.returncode not in {0, 1}:
+                LOGGER.warning(
+                    "stateShare git diff failed: %s",
+                    _git_error_text(diff),
+                )
+                return
+
+            commit = _run_git(
+                repo,
+                ["commit", "-m", f"Update status {_format_time(now_ms)}"],
+                self._state_share_commit_timeout_seconds,
+            )
+            if commit.returncode != 0:
+                LOGGER.warning(
+                    "stateShare git commit failed: %s",
+                    _git_error_text(commit),
+                )
+                return
+
+            if not self._state_share_push:
+                return
+            push = _run_git(
+                repo,
+                ["push", self._state_share_remote, self._state_share_branch],
+                self._state_share_commit_timeout_seconds,
+            )
+            if push.returncode != 0:
+                LOGGER.warning("stateShare git push failed: %s", _git_error_text(push))
+        except (OSError, subprocess.SubprocessError):
+            LOGGER.exception("stateShare auto commit failed")
 
     def _format_status_locked(
         self, items: list[ScheduleTask | ScheduleEntry], phone_status: dict[str, Any]
@@ -1030,6 +1131,23 @@ def _write_json_file(path: Path, payload: dict[str, Any]) -> None:
 def _write_text_file(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
+
+
+def _run_git(
+    repo: Path, args: list[str], timeout_seconds: int
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["git", *args],
+        cwd=repo,
+        text=True,
+        capture_output=True,
+        timeout=timeout_seconds,
+        check=False,
+    )
+
+
+def _git_error_text(result: subprocess.CompletedProcess[str]) -> str:
+    return (result.stderr or result.stdout or f"exit {result.returncode}").strip()
 
 
 def _prune_daily_files(daily_dir: Path, history_days: int, now_ms: int) -> None:

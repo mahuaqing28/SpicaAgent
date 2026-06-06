@@ -59,6 +59,13 @@ Defaults:
 - `SCHEDULE_BRIDGE_TOKEN=<PHONE_BRIDGE_TOKEN>`
 - `SCHEDULE_STATE_FILE=/tmp/spica-agent/schedule-state.json`
 - `SCHEDULE_STATESHARE_FILE=<empty>`
+- `SCHEDULE_STATESHARE_OWNER=2049`
+- `SCHEDULE_STATESHARE_AUTO_COMMIT=false`
+- `SCHEDULE_STATESHARE_REPO=<parent of SCHEDULE_STATESHARE_FILE/data>`
+- `SCHEDULE_STATESHARE_PUSH=true`
+- `SCHEDULE_STATESHARE_BRANCH=main`
+- `SCHEDULE_STATESHARE_REMOTE=origin`
+- `SCHEDULE_STATESHARE_COMMIT_TIMEOUT_SECONDS=30`
 - `SCHEDULE_AGENT_DIR=<CLAUDE_WORKDIR>/schedule`
 - `SCHEDULE_AGENT_HISTORY_DAYS=7`
 - `SCHEDULE_NON_WORK_PACKAGES=<empty>`
@@ -188,8 +195,13 @@ schedule/phone snapshot, `tasks.json` for the full current task database,
 files retained for `SCHEDULE_AGENT_HISTORY_DAYS` days. Agent prompts point Claude
 at these files instead of embedding the full task database in the prompt. If
 `SCHEDULE_STATESHARE_FILE` is set, the bridge also writes a public
-stateShare-compatible `status.json` with schedule titles, completion state,
-progress, focus, and energy, but without detailed app package usage. Configure
+stateShare-compatible `status.json` with `owner`, `tagline`, `funnyStatus`,
+`today_bgm`, and scheduled `TIME_BLOCK`/`FLOATING` items, but without task
+descriptions, completion state, reminder settings, phone status, or detailed app
+package usage. If `SCHEDULE_STATESHARE_AUTO_COMMIT=true`, the bridge commits
+changed `status.json` files inside `SCHEDULE_STATESHARE_REPO` and optionally
+pushes them to `SCHEDULE_STATESHARE_REMOTE`/`SCHEDULE_STATESHARE_BRANCH`.
+Configure
 `SCHEDULE_NON_WORK_PACKAGES` with comma-separated package names such as
 `com.instagram.android,com.google.android.youtube`; when one of those apps
 exceeds `SCHEDULE_NON_WORK_THRESHOLD_MINUTES` while a high-priority or imminent

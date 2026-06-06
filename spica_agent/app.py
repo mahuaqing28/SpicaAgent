@@ -598,6 +598,14 @@ def main() -> int:
             state_share_default_tagline=config.schedule_stateshare_default_tagline,
             state_share_default_funny_status=config.schedule_stateshare_default_funny_status,
             state_share_default_bgm=config.schedule_stateshare_default_bgm,
+            state_share_auto_commit=config.schedule_stateshare_auto_commit,
+            state_share_repo=config.schedule_stateshare_repo,
+            state_share_push=config.schedule_stateshare_push,
+            state_share_branch=config.schedule_stateshare_branch,
+            state_share_remote=config.schedule_stateshare_remote,
+            state_share_commit_timeout_seconds=(
+                config.schedule_stateshare_commit_timeout_seconds
+            ),
             non_work_packages=config.schedule_non_work_packages,
             non_work_threshold_minutes=config.schedule_non_work_threshold_minutes,
             reminder_cooldown_minutes=config.schedule_reminder_cooldown_minutes,

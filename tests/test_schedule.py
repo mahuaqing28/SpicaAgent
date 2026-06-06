@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import tempfile
 import unittest
 from datetime import datetime
@@ -68,6 +69,33 @@ def phone_status(*, package_name: str = "com.video", minutes: int = 25) -> dict:
             }
         ],
     }
+
+
+def init_git_repo(path: Path) -> None:
+    subprocess.run(["git", "init"], cwd=path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "spica@example.test"],
+        cwd=path,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Spica Test"],
+        cwd=path,
+        check=True,
+        capture_output=True,
+    )
+
+
+def git_output(path: Path, *args: str) -> str:
+    result = subprocess.run(
+        ["git", *args],
+        cwd=path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout.strip()
 
 
 class ScheduleStateStoreTests(unittest.TestCase):
@@ -288,6 +316,62 @@ class ScheduleStateStoreTests(unittest.TestCase):
             loaded = ScheduleStateStore(state_file=state_file)
             self.assertIn("写项目报告", loaded.format_status())
             self.assertEqual(loaded.state_share_payload(now_ms=NOW)["today_bgm"], "Night Drive")
+
+    def test_stateshare_auto_commit_commits_file_and_skips_no_diff(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "stateShare"
+            repo.mkdir()
+            init_git_repo(repo)
+            share_file = repo / "data" / "status.json"
+            store = ScheduleStateStore(
+                state_share_file=share_file,
+                state_share_auto_commit=True,
+                state_share_repo=repo,
+                state_share_push=False,
+            )
+            payload = {
+                "today": "2023-11-14",
+                "sent_at_ms": NOW,
+                "tasks": [task("1", "写项目报告")],
+                "schedules": [schedule("s1", "1")],
+            }
+
+            store.process_snapshot(payload, now_ms=NOW)
+
+            self.assertTrue(share_file.is_file())
+            self.assertEqual(git_output(repo, "rev-list", "--count", "HEAD"), "1")
+            self.assertEqual(git_output(repo, "status", "--short"), "")
+            self.assertIn("Update status", git_output(repo, "log", "-1", "--pretty=%s"))
+
+            store.process_snapshot(payload, now_ms=NOW)
+
+            self.assertEqual(git_output(repo, "rev-list", "--count", "HEAD"), "1")
+
+    def test_stateshare_auto_commit_failure_does_not_fail_sync(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "not-a-git-repo"
+            share_file = repo / "data" / "status.json"
+            store = ScheduleStateStore(
+                state_share_file=share_file,
+                state_share_auto_commit=True,
+                state_share_repo=repo,
+                state_share_push=False,
+            )
+
+            with self.assertLogs("spica_agent.schedule", level="WARNING") as logs:
+                result = store.process_snapshot(
+                    {
+                        "today": "2023-11-14",
+                        "tasks": [task("1", "写项目报告")],
+                        "schedules": [schedule("s1", "1")],
+                    },
+                    now_ms=NOW,
+                )
+
+            self.assertEqual(result.accepted_task_ids, ["1"])
+            self.assertTrue(share_file.is_file())
+            self.assertIn("stateShare git status failed", "\n".join(logs.output))
 
     def test_status_payload_contains_private_state_and_public_payload_hides_packages(self) -> None:
         store = ScheduleStateStore(non_work_packages=frozenset({"com.video"}))
