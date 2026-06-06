@@ -18,6 +18,20 @@ class FakeTelegram:
         self.sent.append((chat_id, text))
 
 
+def task_payload(task_id: str, title: str, now_ms: int, *, completed: bool = False) -> dict:
+    return {
+        "id": task_id,
+        "title": title,
+        "description": "important",
+        "deadline_ms": now_ms + 60 * 60 * 1000,
+        "is_completed": completed,
+        "completed_at_ms": now_ms if completed else None,
+        "created_at_ms": now_ms - 60 * 60 * 1000,
+        "parent_id": None,
+        "priority": 5,
+    }
+
+
 class PhoneHttpServerTests(unittest.TestCase):
     def setUp(self) -> None:
         self.telegram = FakeTelegram()
@@ -130,15 +144,8 @@ class PhoneHttpServerTests(unittest.TestCase):
             {
                 "device_id": "device-1",
                 "today": "2026-06-04",
-                "tasks": [
-                    {
-                        "id": "task-1",
-                        "title": "写项目报告",
-                        "deadline_ms": now_ms + 60 * 60 * 1000,
-                        "priority": 5,
-                        "is_completed": False,
-                    }
-                ],
+                "tasks": [task_payload("task-1", "写项目报告", now_ms)],
+                "schedules": [],
                 "phone_status": {
                     "recent_apps": [
                         {
@@ -155,13 +162,14 @@ class PhoneHttpServerTests(unittest.TestCase):
 
         self.assertEqual(status, 200)
         self.assertEqual(data["accepted_task_ids"], ["task-1"])
+        self.assertEqual(data["accepted_schedule_ids"], [])
         self.assertEqual(data["reminder_count"], 1)
         self.assertEqual(self.schedule_callbacks[0][0], 42)
         self.assertIn("写项目报告", self.schedule_callbacks[0][1].agent_prompt)
 
     def test_schedule_uses_separate_token(self) -> None:
         status, data = self.post(
-            {"tasks": []},
+            {"tasks": [], "schedules": []},
             path="/api/schedule/snapshot",
             token="secret",
         )
@@ -172,13 +180,8 @@ class PhoneHttpServerTests(unittest.TestCase):
     def test_accepts_schedule_changes(self) -> None:
         status, data = self.post(
             {
-                "changed_tasks": [
-                    {
-                        "id": "task-1",
-                        "title": "写项目报告",
-                        "is_completed": True,
-                    }
-                ]
+                "changed_tasks": [task_payload("task-1", "写项目报告", int(time.time() * 1000), completed=True)],
+                "changed_schedules": [],
             },
             path="/api/schedule/changes",
             token="schedule-secret",
@@ -186,6 +189,7 @@ class PhoneHttpServerTests(unittest.TestCase):
 
         self.assertEqual(status, 200)
         self.assertEqual(data["accepted_task_ids"], ["task-1"])
+        self.assertEqual(data["accepted_schedule_ids"], [])
 
     def test_schedule_status_get_returns_private_current_state(self) -> None:
         now_ms = int(time.time() * 1000)
@@ -194,15 +198,8 @@ class PhoneHttpServerTests(unittest.TestCase):
                 "device_id": "device-1",
                 "today": "2026-06-04",
                 "sent_at_ms": now_ms,
-                "tasks": [
-                    {
-                        "id": "task-1",
-                        "title": "写项目报告",
-                        "deadline_ms": now_ms + 60 * 60 * 1000,
-                        "priority": 5,
-                        "is_completed": False,
-                    }
-                ],
+                "tasks": [task_payload("task-1", "写项目报告", now_ms)],
+                "schedules": [],
                 "phone_status": {
                     "recent_apps": [
                         {
@@ -232,15 +229,8 @@ class PhoneHttpServerTests(unittest.TestCase):
             {
                 "device_id": "device-1",
                 "today": "2026-06-04",
-                "tasks": [
-                    {
-                        "id": "task-1",
-                        "title": "写项目报告",
-                        "deadline_ms": now_ms + 60 * 60 * 1000,
-                        "priority": 5,
-                        "is_completed": False,
-                    }
-                ],
+                "tasks": [task_payload("task-1", "写项目报告", now_ms)],
+                "schedules": [],
                 "phone_status": {
                     "recent_apps": [
                         {

@@ -281,8 +281,13 @@ class AppTests(unittest.TestCase):
                         "title": "写项目报告",
                         "deadline_ms": 1_700_003_600_000,
                         "priority": 5,
+                        "is_completed": False,
+                        "completed_at_ms": None,
+                        "created_at_ms": 1_699_996_400_000,
+                        "parent_id": None,
                     }
                 ],
+                "schedules": [],
             },
             now_ms=1_700_000_000_000,
         )
@@ -310,8 +315,13 @@ class AppTests(unittest.TestCase):
                         "title": "写项目报告",
                         "deadline_ms": 1_700_003_600_000,
                         "priority": 5,
+                        "is_completed": False,
+                        "completed_at_ms": None,
+                        "created_at_ms": 1_699_996_400_000,
+                        "parent_id": None,
                     }
                 ],
+                "schedules": [],
             },
             now_ms=1_700_000_000_000,
         )

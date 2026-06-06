@@ -16,6 +16,7 @@ export PHONE_BRIDGE_PORT=8765
 export SCHEDULE_STATE_FILE=/tmp/spica-agent/schedule-state.json
 export SCHEDULE_STATESHARE_FILE=/home/mahuaqing/personnalProject/stateShare/data/status.json
 export SCHEDULE_NON_WORK_PACKAGES="com.google.android.youtube,com.instagram.android"
+export SCHEDULE_REMINDER_CHECK_INTERVAL_SECONDS=60
 ```
 
 If phone status sync and schedule sync come from the same Android device,
@@ -60,16 +61,24 @@ Payload:
       "id": 12,
       "title": "写项目报告",
       "description": "整理实现进度",
-      "protocol": "DUTY",
-      "deadline": 1780603200000,
-      "isCompleted": false,
-      "completedAt": null,
-      "parentId": null,
-      "createdAt": 1780580000000,
-      "startedAt": 1780583600000,
-      "priority": 5,
-      "reminderEnabled": true,
-      "reminderMinutesBefore": 10
+      "deadline_ms": 1780603200000,
+      "is_completed": false,
+      "completed_at_ms": null,
+      "parent_id": null,
+      "created_at_ms": 1780580000000,
+      "priority": 5
+    }
+  ],
+  "schedules": [
+    {
+      "id": 31,
+      "task_id": 12,
+      "date": "2026-06-05",
+      "type": "TIME_BLOCK",
+      "start_time_ms": 1780599600000,
+      "end_time_ms": 1780603200000,
+      "reminder_enabled": true,
+      "reminder_minutes_before": 10
     }
   ],
   "phone_status": {
@@ -92,22 +101,46 @@ Payload:
 }
 ```
 
-The bridge accepts both snake_case and current `time-is-money-app` camelCase
-field names. For the existing Room `Task` model, send:
+The bridge expects the new split payload only. Send task data in `tasks` and
+schedule/reminder data in `schedules`. Both arrays are required and may be
+empty.
+
+For each task, send:
 
 - `id`
 - `title`
 - `description`
-- `protocol`
-- `deadline`
-- `isCompleted`
-- `completedAt`
-- `parentId`
-- `createdAt`
-- `startedAt`
+- `deadline_ms`
+- `is_completed`
+- `completed_at_ms`
+- `parent_id`
+- `created_at_ms`
 - `priority`
-- `reminderEnabled`
-- `reminderMinutesBefore`
+
+For each schedule, send:
+
+- `id`
+- `task_id`
+- `date`
+- `type`
+- `start_time_ms`
+- `end_time_ms`
+- `reminder_enabled`
+- `reminder_minutes_before`
+
+`schedule.task_id` must reference a task included in the same snapshot or
+already known to the server during a changes sync.
+
+Success response:
+
+```json
+{
+  "ok": true,
+  "accepted_task_ids": ["12"],
+  "accepted_schedule_ids": ["31"],
+  "reminder_count": 0
+}
+```
 
 ## Changes Endpoint
 
@@ -128,10 +161,25 @@ Payload:
     {
       "id": 12,
       "title": "写项目报告",
-      "deadline": 1780603200000,
-      "isCompleted": true,
-      "completedAt": 1780590000000,
+      "description": "整理实现进度",
+      "deadline_ms": 1780603200000,
+      "is_completed": true,
+      "completed_at_ms": 1780590000000,
+      "parent_id": null,
+      "created_at_ms": 1780580000000,
       "priority": 5
+    }
+  ],
+  "changed_schedules": [
+    {
+      "id": 31,
+      "task_id": 12,
+      "date": "2026-06-05",
+      "type": "TIME_BLOCK",
+      "start_time_ms": 1780599600000,
+      "end_time_ms": 1780603200000,
+      "reminder_enabled": true,
+      "reminder_minutes_before": 10
     }
   ],
   "phone_status": {
@@ -142,6 +190,11 @@ Payload:
 
 For deletes, the v1 bridge should send a full snapshot after deletion instead of
 inventing a tombstone format.
+
+If only a task changes, send it in `changed_tasks` and send
+`"changed_schedules": []`. Existing server-side schedules linked to that task
+will refresh their title, description, deadline, completion state, and priority
+from the changed task.
 
 ## Realtime Query Endpoints
 
@@ -170,6 +223,10 @@ The Android client should enqueue:
 
 Use `NetworkType.CONNECTED`; failed syncs should return `Result.retry()` for
 workers and show a short UI status for manual sync.
+
+The server also checks stored schedules every
+`SCHEDULE_REMINDER_CHECK_INTERVAL_SECONDS` seconds, so configured schedule
+reminders can fire even when the phone is not syncing at that exact moment.
 
 ## Acceptance Checklist
 

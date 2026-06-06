@@ -156,6 +156,7 @@ def _handler_factory(
                 {
                     "ok": True,
                     "accepted_task_ids": result.accepted_task_ids,
+                    "accepted_schedule_ids": result.accepted_schedule_ids,
                     "reminder_count": reminder_count,
                 },
             )

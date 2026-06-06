@@ -138,6 +138,7 @@ class AppConfig:
     schedule_non_work_packages: frozenset[str]
     schedule_non_work_threshold_minutes: int
     schedule_reminder_cooldown_minutes: int
+    schedule_reminder_check_interval_seconds: int
 
     @property
     def claude_binary(self) -> str:
@@ -298,6 +299,9 @@ class AppConfig:
             ),
             schedule_reminder_cooldown_minutes=_parse_int(
                 source, "SCHEDULE_REMINDER_COOLDOWN_MINUTES", 120, minimum=1
+            ),
+            schedule_reminder_check_interval_seconds=_parse_int(
+                source, "SCHEDULE_REMINDER_CHECK_INTERVAL_SECONDS", 60, minimum=1
             ),
         )
 

@@ -89,6 +89,7 @@ class ConfigTests(unittest.TestCase):
                     "SCHEDULE_NON_WORK_PACKAGES": "com.video,com.social",
                     "SCHEDULE_NON_WORK_THRESHOLD_MINUTES": "15",
                     "SCHEDULE_REMINDER_COOLDOWN_MINUTES": "45",
+                    "SCHEDULE_REMINDER_CHECK_INTERVAL_SECONDS": "30",
                 }
             )
             config = AppConfig.from_env(env, cwd=path)
@@ -103,6 +104,7 @@ class ConfigTests(unittest.TestCase):
         )
         self.assertEqual(config.schedule_non_work_threshold_minutes, 15)
         self.assertEqual(config.schedule_reminder_cooldown_minutes, 45)
+        self.assertEqual(config.schedule_reminder_check_interval_seconds, 30)
 
 
 if __name__ == "__main__":

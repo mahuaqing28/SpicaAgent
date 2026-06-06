@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 import time
+from collections.abc import Callable
 
 from .config import AppConfig, ConfigError
 from .env_file import EnvFileError, load_env_file
@@ -21,6 +23,44 @@ from .worker import ClaudeWorker, WorkItem
 
 
 LOGGER = logging.getLogger(__name__)
+
+
+class ScheduleReminderPoller:
+    def __init__(
+        self,
+        *,
+        store: ScheduleStateStore,
+        notify_chat_ids: frozenset[int],
+        callback: Callable[[int, ScheduleReminder], None],
+        interval_seconds: int,
+    ) -> None:
+        self._store = store
+        self._notify_chat_ids = notify_chat_ids
+        self._callback = callback
+        self._interval_seconds = interval_seconds
+        self._stop = threading.Event()
+        self._thread = threading.Thread(
+            target=self._run,
+            name="schedule-reminder-poller",
+            daemon=True,
+        )
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._thread.join(timeout=5)
+
+    def _run(self) -> None:
+        while not self._stop.wait(self._interval_seconds):
+            try:
+                reminders = self._store.due_reminders()
+                for reminder in reminders:
+                    for chat_id in self._notify_chat_ids:
+                        self._callback(chat_id, reminder)
+            except Exception:
+                LOGGER.exception("Schedule reminder polling failed")
 
 
 class BridgeApp:
@@ -404,6 +444,9 @@ class BridgeApp:
         return "\n".join(lines)
 
     def enqueue_schedule_reminder(self, chat_id: int, reminder: ScheduleReminder) -> None:
+        if not reminder.use_agent:
+            self._telegram.send_message(chat_id, reminder.text)
+            return
         queue_position = self._worker.enqueue(
             WorkItem(
                 chat_id=chat_id,
@@ -586,6 +629,18 @@ def main() -> int:
     app = BridgeApp(config, telegram, worker, phone_store, file_store, schedule_store)
     if "app_ref" in locals():
         app_ref = app
+    if schedule_store is not None and "notify_chat_ids" in locals() and notify_chat_ids:
+        poller = ScheduleReminderPoller(
+            store=schedule_store,
+            notify_chat_ids=notify_chat_ids,
+            callback=schedule_callback,
+            interval_seconds=config.schedule_reminder_check_interval_seconds,
+        )
+        poller.start()
+        LOGGER.info(
+            "Schedule reminder poller started with %s second interval",
+            config.schedule_reminder_check_interval_seconds,
+        )
     app.run()
     return 0
 

@@ -25,17 +25,13 @@ class ScheduleTask:
     is_completed: bool
     completed_at_ms: int | None
     priority: int
-    started_at_ms: int | None
+    created_at_ms: int
     parent_id: str | None
-    protocol: str
-    updated_at_ms: int | None
 
     @property
     def status(self) -> str:
         if self.is_completed:
             return "done"
-        if self.started_at_ms:
-            return "doing"
         return "todo"
 
 
@@ -43,12 +39,48 @@ class ScheduleTask:
 class ScheduleReminder:
     text: str
     agent_prompt: str
+    use_agent: bool = True
 
 
 @dataclass(frozen=True)
 class ScheduleProcessResult:
     accepted_task_ids: list[str]
+    accepted_schedule_ids: list[str]
     reminders: list[ScheduleReminder]
+
+
+@dataclass(frozen=True)
+class ScheduleEntry:
+    id: str
+    task_id: str
+    title: str
+    description: str
+    date: str
+    type: str
+    start_time_ms: int | None
+    end_time_ms: int | None
+    deadline_ms: int | None
+    is_completed: bool
+    priority: int
+    reminder_enabled: bool
+    reminder_minutes_before: int
+
+    @property
+    def status(self) -> str:
+        if self.is_completed:
+            return "done"
+        if self.start_time_ms is not None:
+            return "doing"
+        return "todo"
+
+    @property
+    def reminder_at_ms(self) -> int | None:
+        if not self.reminder_enabled or self.is_completed:
+            return None
+        target_ms = self.deadline_ms or self.start_time_ms or self.end_time_ms
+        if target_ms is None:
+            return None
+        return target_ms - max(self.reminder_minutes_before, 0) * 60 * 1000
 
 
 class ScheduleStateStore:
@@ -70,6 +102,7 @@ class ScheduleStateStore:
         self._non_work_threshold_ms = non_work_threshold_minutes * 60 * 1000
         self._reminder_cooldown_ms = reminder_cooldown_minutes * 60 * 1000
         self._tasks: dict[str, ScheduleTask] = {}
+        self._schedules: dict[str, ScheduleEntry] = {}
         self._phone_status: dict[str, Any] = {}
         self._device_id = ""
         self._timezone = "Asia/Shanghai"
@@ -83,6 +116,7 @@ class ScheduleStateStore:
     ) -> ScheduleProcessResult:
         now = _now_ms() if now_ms is None else now_ms
         tasks = [_parse_task(item) for item in _required_list(payload, "tasks")]
+        schedules = _parse_schedules(_required_list(payload, "schedules"), tasks)
         phone_status = _optional_object(payload.get("phone_status"))
         device_id = str(payload.get("device_id") or self._device_id or "").strip()
         timezone_name = str(payload.get("timezone") or self._timezone or "Asia/Shanghai")
@@ -91,6 +125,7 @@ class ScheduleStateStore:
 
         with self._lock:
             self._tasks = {task.id: task for task in tasks}
+            self._schedules = {schedule.id: schedule for schedule in schedules}
             if phone_status is not None:
                 self._phone_status = phone_status
             self._device_id = device_id
@@ -103,6 +138,7 @@ class ScheduleStateStore:
 
         return ScheduleProcessResult(
             accepted_task_ids=[task.id for task in tasks],
+            accepted_schedule_ids=[schedule.id for schedule in schedules],
             reminders=reminders,
         )
 
@@ -111,6 +147,10 @@ class ScheduleStateStore:
     ) -> ScheduleProcessResult:
         now = _now_ms() if now_ms is None else now_ms
         changed_tasks = [_parse_task(item) for item in _required_list(payload, "changed_tasks")]
+        changed_schedules = _parse_schedules(
+            _required_list(payload, "changed_schedules"),
+            list(self._tasks.values()) + changed_tasks,
+        )
         phone_status = _optional_object(payload.get("phone_status"))
         timezone_name = str(payload.get("timezone") or self._timezone or "Asia/Shanghai")
         today = str(payload.get("today") or self._today or _date_label(now))
@@ -118,8 +158,18 @@ class ScheduleStateStore:
         device_id = str(payload.get("device_id") or self._device_id or "").strip()
 
         with self._lock:
+            changed_task_ids = {task.id for task in changed_tasks}
             for task in changed_tasks:
                 self._tasks[task.id] = task
+            for schedule in changed_schedules:
+                self._schedules[schedule.id] = schedule
+            changed_schedule_ids = {schedule.id for schedule in changed_schedules}
+            for schedule_id, schedule in list(self._schedules.items()):
+                if schedule_id in changed_schedule_ids or schedule.task_id not in changed_task_ids:
+                    continue
+                task = self._tasks.get(schedule.task_id)
+                if task is not None:
+                    self._schedules[schedule_id] = _schedule_with_task(schedule, task)
             if phone_status is not None:
                 self._phone_status = phone_status
             self._device_id = device_id
@@ -132,28 +182,21 @@ class ScheduleStateStore:
 
         return ScheduleProcessResult(
             accepted_task_ids=[task.id for task in changed_tasks],
+            accepted_schedule_ids=[schedule.id for schedule in changed_schedules],
             reminders=reminders,
         )
 
     def format_status(self) -> str:
         with self._lock:
-            tasks = sorted(
-                self._tasks.values(),
-                key=lambda task: (
-                    task.is_completed,
-                    task.deadline_ms is None,
-                    task.deadline_ms or 0,
-                    -task.priority,
-                ),
-            )
+            items = self._display_items_locked()
             updated_at_ms = self._updated_at_ms
             phone_status = dict(self._phone_status)
 
-        if not tasks:
+        if not items:
             return "尚未收到日程同步。"
 
-        total = len(tasks)
-        done = sum(1 for task in tasks if task.is_completed)
+        total = len(items)
+        done = sum(1 for item in items if item.status == "done")
         lines = [
             "当前日程状态：",
             f"更新: {_format_time(updated_at_ms) if updated_at_ms else 'unknown'}",
@@ -163,33 +206,26 @@ class ScheduleStateStore:
         if focus:
             lines.append(f"最近应用: {focus}")
         lines.append("")
-        for task in tasks[:12]:
-            marker = "x" if task.is_completed else ">"
-            deadline = _time_label(task.deadline_ms)
-            lines.append(f"- [{marker}] {deadline} {task.title} P{task.priority}")
+        for item in items[:12]:
+            marker = "x" if item.status == "done" else ">"
+            lines.append(f"- [{marker}] {_item_time_label(item)} {item.title} P{item.priority}")
         return "\n".join(lines)
 
     def status_payload(self) -> dict[str, Any]:
         with self._lock:
-            tasks = sorted(
-                self._tasks.values(),
-                key=lambda task: (
-                    task.is_completed,
-                    task.deadline_ms is None,
-                    task.deadline_ms or 0,
-                    -task.priority,
-                ),
-            )
+            tasks = self._sorted_tasks_locked()
+            schedules = self._sorted_schedules_locked()
             phone_status = dict(self._phone_status)
             return {
                 "device_id": self._device_id,
                 "timezone": self._timezone,
                 "today": self._today,
                 "updated_at_ms": self._updated_at_ms,
-                "progress": _progress_payload(tasks),
+                "progress": _progress_payload(self._display_items_locked()),
                 "tasks": [_task_to_json(task) for task in tasks],
+                "schedules": [_schedule_to_json(schedule) for schedule in schedules],
                 "phone_status": phone_status,
-                "summary": self._format_status_locked(tasks, phone_status),
+                "summary": self._format_status_locked(self._display_items_locked(), phone_status),
             }
 
     def state_share_payload(self, *, now_ms: int | None = None) -> dict[str, Any]:
@@ -197,7 +233,17 @@ class ScheduleStateStore:
         with self._lock:
             return self._state_share_payload_locked(now)
 
+    def due_reminders(self, *, now_ms: int | None = None) -> list[ScheduleReminder]:
+        now = _now_ms() if now_ms is None else now_ms
+        with self._lock:
+            reminders = self._due_schedule_reminders_locked(now)
+            if reminders:
+                self._save_locked()
+                self._write_state_share_locked(now)
+            return reminders
+
     def _reminders_for_locked(self, now_ms: int) -> list[ScheduleReminder]:
+        reminders = self._due_schedule_reminders_locked(now_ms)
         risky_tasks = _risky_tasks(list(self._tasks.values()), now_ms)
         distracting_apps = _distracting_apps(
             self._phone_status,
@@ -205,9 +251,8 @@ class ScheduleStateStore:
             self._non_work_threshold_ms,
         )
         if not risky_tasks or not distracting_apps:
-            return []
+            return reminders
 
-        reminders: list[ScheduleReminder] = []
         top_task = risky_tasks[0]
         for app in distracting_apps:
             package = app["package_name"]
@@ -224,7 +269,32 @@ class ScheduleStateStore:
             reminders.append(
                 ScheduleReminder(
                     text=text,
-                    agent_prompt=_agent_prompt(top_task, app, list(self._tasks.values()), self._phone_status),
+                    agent_prompt=_agent_prompt(
+                        top_task,
+                        app,
+                        list(self._tasks.values()),
+                        self._display_items_locked(),
+                        self._phone_status,
+                    ),
+                )
+            )
+        return reminders
+
+    def _due_schedule_reminders_locked(self, now_ms: int) -> list[ScheduleReminder]:
+        reminders: list[ScheduleReminder] = []
+        for entry in self._sorted_schedules_locked():
+            reminder_at = entry.reminder_at_ms
+            if reminder_at is None or reminder_at > now_ms:
+                continue
+            key = f"deadline:{entry.id}:{reminder_at}"
+            if key in self._reminder_at:
+                continue
+            self._reminder_at[key] = now_ms
+            reminders.append(
+                ScheduleReminder(
+                    text=_deadline_reminder_text(entry, reminder_at),
+                    agent_prompt="",
+                    use_agent=False,
                 )
             )
         return reminders
@@ -249,6 +319,17 @@ class ScheduleStateStore:
                         continue
                     parsed[task.id] = task
             self._tasks = parsed
+        schedules = data.get("schedules")
+        if isinstance(schedules, list):
+            parsed_schedules: dict[str, ScheduleEntry] = {}
+            for item in schedules:
+                if isinstance(item, dict):
+                    try:
+                        schedule = _parse_schedule(item, self._tasks)
+                    except SchedulePayloadError:
+                        continue
+                    parsed_schedules[schedule.id] = schedule
+            self._schedules = parsed_schedules
         self._phone_status = _optional_object(data.get("phone_status")) or {}
         self._device_id = str(data.get("device_id") or "")
         self._timezone = str(data.get("timezone") or "Asia/Shanghai")
@@ -273,6 +354,7 @@ class ScheduleStateStore:
             "updated_at_ms": self._updated_at_ms,
             "phone_status": self._phone_status,
             "tasks": [_task_to_json(task) for task in self._tasks.values()],
+            "schedules": [_schedule_to_json(schedule) for schedule in self._schedules.values()],
             "reminder_at": self._reminder_at,
         }
         self._state_file.write_text(
@@ -291,38 +373,39 @@ class ScheduleStateStore:
         )
 
     def _format_status_locked(
-        self, tasks: list[ScheduleTask], phone_status: dict[str, Any]
+        self, items: list[ScheduleTask | ScheduleEntry], phone_status: dict[str, Any]
     ) -> str:
-        if not tasks:
+        if not items:
             return "尚未收到日程同步。"
-        total = len(tasks)
-        done = sum(1 for task in tasks if task.is_completed)
+        total = len(items)
+        done = sum(1 for item in items if item.status == "done")
         focus = _foreground_label(phone_status)
         parts = [f"进度 {done}/{total}"]
         if focus:
             parts.append(f"最近应用 {focus}")
-        active = next((task for task in tasks if not task.is_completed), None)
+        active = next((item for item in items if item.status != "done"), None)
         if active is not None:
             parts.append(f"下一项 {active.title}")
         return "，".join(parts)
 
     def _state_share_payload_locked(self, now_ms: int) -> dict[str, Any]:
-        tasks = sorted(
-            self._tasks.values(),
-            key=lambda task: (task.deadline_ms is None, task.deadline_ms or 0, -task.priority),
-        )
-        total = len(tasks)
-        done = sum(1 for task in tasks if task.is_completed)
+        items = self._display_items_locked()
+        total = len(items)
+        done = sum(1 for item in items if item.status == "done")
         progress = int(done * 100 / total) if total else 0
         schedule = [
             {
-                "time": _time_label(task.deadline_ms),
-                "title": task.title,
-                "note": task.description,
-                "status": task.status,
+                "time": _item_time_label(item),
+                "title": item.title,
+                "note": item.description,
+                "status": item.status,
             }
-            for task in tasks
-            if task.deadline_ms is not None or not task.is_completed
+            for item in items
+            if (
+                item.deadline_ms is not None
+                or (isinstance(item, ScheduleEntry) and item.start_time_ms is not None)
+                or item.status != "done"
+            )
         ][:12]
         payload = {
             "owner": "mahuaqing",
@@ -338,6 +421,36 @@ class ScheduleStateStore:
         }
         return payload
 
+    def _sorted_tasks_locked(self) -> list[ScheduleTask]:
+        return sorted(
+            self._tasks.values(),
+            key=lambda task: (
+                task.is_completed,
+                task.deadline_ms is None,
+                task.deadline_ms or 0,
+                -task.priority,
+            ),
+        )
+
+    def _sorted_schedules_locked(self) -> list[ScheduleEntry]:
+        return sorted(
+            self._schedules.values(),
+            key=lambda schedule: (
+                schedule.is_completed,
+                schedule.start_time_ms is None and schedule.deadline_ms is None,
+                schedule.start_time_ms or schedule.deadline_ms or 0,
+                -schedule.priority,
+            ),
+        )
+
+    def _display_items_locked(self) -> list[ScheduleTask | ScheduleEntry]:
+        schedules = self._sorted_schedules_locked()
+        scheduled_task_ids = {schedule.task_id for schedule in schedules}
+        unscheduled_tasks = [
+            task for task in self._sorted_tasks_locked() if task.id not in scheduled_task_ids
+        ]
+        return [*schedules, *unscheduled_tasks]
+
 
 def _parse_task(raw: Any) -> ScheduleTask:
     if not isinstance(raw, dict):
@@ -351,18 +464,18 @@ def _parse_task(raw: Any) -> ScheduleTask:
         raise SchedulePayloadError("task.id must not be empty")
     if not title:
         raise SchedulePayloadError("task.title is required")
+    is_completed = _required_bool(raw, "is_completed", "task")
+    created_at_ms = _required_int(raw, "created_at_ms", "task")
     return ScheduleTask(
         id=task_id,
         title=title,
-        description=str(raw.get("description") or raw.get("note") or "").strip(),
-        deadline_ms=_optional_int(raw.get("deadline_ms", raw.get("deadline"))),
-        is_completed=bool(raw.get("is_completed", raw.get("isCompleted", False))),
-        completed_at_ms=_optional_int(raw.get("completed_at_ms", raw.get("completedAt"))),
+        description=str(raw.get("description") or "").strip(),
+        deadline_ms=_optional_int(raw.get("deadline_ms")),
+        is_completed=is_completed,
+        completed_at_ms=_optional_int(raw.get("completed_at_ms")),
         priority=_coerce_priority(raw.get("priority")),
-        started_at_ms=_optional_int(raw.get("started_at_ms", raw.get("startedAt"))),
-        parent_id=_optional_str(raw.get("parent_id", raw.get("parentId"))),
-        protocol=str(raw.get("protocol") or "DUTY"),
-        updated_at_ms=_optional_int(raw.get("updated_at_ms", raw.get("updatedAt"))),
+        created_at_ms=created_at_ms,
+        parent_id=_optional_str(raw.get("parent_id")),
     )
 
 
@@ -375,16 +488,126 @@ def _task_to_json(task: ScheduleTask) -> dict[str, Any]:
         "is_completed": task.is_completed,
         "completed_at_ms": task.completed_at_ms,
         "priority": task.priority,
-        "started_at_ms": task.started_at_ms,
+        "created_at_ms": task.created_at_ms,
         "parent_id": task.parent_id,
-        "protocol": task.protocol,
-        "updated_at_ms": task.updated_at_ms,
     }
 
 
-def _progress_payload(tasks: list[ScheduleTask]) -> dict[str, int]:
-    total = len(tasks)
-    done = sum(1 for task in tasks if task.is_completed)
+def _parse_schedules(
+    raw_schedules: list[Any],
+    tasks: list[ScheduleTask],
+) -> list[ScheduleEntry]:
+    task_map = {task.id: task for task in tasks}
+    return [_parse_schedule(item, task_map) for item in raw_schedules]
+
+
+def _parse_schedule(
+    raw: Any,
+    tasks: dict[str, ScheduleTask],
+) -> ScheduleEntry:
+    if not isinstance(raw, dict):
+        raise SchedulePayloadError("schedule must be an object")
+    raw_id = raw.get("id")
+    if raw_id is None:
+        raise SchedulePayloadError("schedule.id is required")
+    schedule_id = str(raw_id).strip()
+    if not schedule_id:
+        raise SchedulePayloadError("schedule.id must not be empty")
+
+    raw_task_id = raw.get("task_id")
+    if raw_task_id is None:
+        raise SchedulePayloadError("schedule.task_id is required")
+    task_id = str(raw_task_id).strip()
+    if not task_id:
+        raise SchedulePayloadError("schedule.task_id must not be empty")
+
+    task = tasks.get(task_id)
+    if task is None:
+        raise SchedulePayloadError(f"schedule.task_id references unknown task: {task_id}")
+
+    date = str(raw.get("date") or "").strip()
+    if not date:
+        raise SchedulePayloadError("schedule.date is required")
+    schedule_type = str(raw.get("type") or "").strip()
+    if not schedule_type:
+        raise SchedulePayloadError("schedule.type is required")
+    start_time_ms = _optional_int(raw.get("start_time_ms"))
+    end_time_ms = _optional_int(raw.get("end_time_ms"))
+    reminder_enabled = _required_bool(raw, "reminder_enabled", "schedule")
+    reminder_minutes_before = _coerce_non_negative_int(
+        raw.get("reminder_minutes_before"),
+        default=10,
+    )
+    return ScheduleEntry(
+        id=schedule_id,
+        task_id=task_id,
+        title=task.title,
+        description=task.description,
+        date=date,
+        type=schedule_type,
+        start_time_ms=start_time_ms,
+        end_time_ms=end_time_ms,
+        deadline_ms=task.deadline_ms,
+        is_completed=task.is_completed,
+        priority=task.priority,
+        reminder_enabled=reminder_enabled,
+        reminder_minutes_before=reminder_minutes_before,
+    )
+
+
+def _schedule_to_json(schedule: ScheduleEntry) -> dict[str, Any]:
+    return {
+        "id": schedule.id,
+        "task_id": schedule.task_id,
+        "title": schedule.title,
+        "description": schedule.description,
+        "date": schedule.date,
+        "type": schedule.type,
+        "start_time_ms": schedule.start_time_ms,
+        "end_time_ms": schedule.end_time_ms,
+        "deadline_ms": schedule.deadline_ms,
+        "is_completed": schedule.is_completed,
+        "priority": schedule.priority,
+        "reminder_enabled": schedule.reminder_enabled,
+        "reminder_minutes_before": schedule.reminder_minutes_before,
+    }
+
+
+def _schedule_with_task(schedule: ScheduleEntry, task: ScheduleTask) -> ScheduleEntry:
+    return ScheduleEntry(
+        id=schedule.id,
+        task_id=schedule.task_id,
+        title=task.title,
+        description=task.description,
+        date=schedule.date,
+        type=schedule.type,
+        start_time_ms=schedule.start_time_ms,
+        end_time_ms=schedule.end_time_ms,
+        deadline_ms=task.deadline_ms,
+        is_completed=task.is_completed,
+        priority=task.priority,
+        reminder_enabled=schedule.reminder_enabled,
+        reminder_minutes_before=schedule.reminder_minutes_before,
+    )
+
+
+def _deadline_reminder_text(entry: ScheduleEntry, reminder_at_ms: int) -> str:
+    target_ms = entry.deadline_ms or entry.start_time_ms or entry.end_time_ms
+    deadline = _format_time(target_ms) if target_ms else "未设置具体时间"
+    reminder_at = _format_time(reminder_at_ms)
+    return "\n".join(
+        [
+            "日程提醒：",
+            f"任务：{entry.title}",
+            f"时间：{deadline}",
+            f"提醒触发：{reminder_at}",
+        ]
+    )
+
+
+def _progress_payload(items: list[ScheduleTask | ScheduleEntry]) -> dict[str, int]:
+    total = len(items)
+    done = sum(1 for item in items if item.status == "done")
     percent = int(done * 100 / total) if total else 0
     return {
         "total": total,
@@ -451,12 +674,17 @@ def _agent_prompt(
     task: ScheduleTask,
     app: dict[str, Any],
     tasks: list[ScheduleTask],
+    items: list[ScheduleTask | ScheduleEntry],
     phone_status: dict[str, Any],
 ) -> str:
     unfinished = [item for item in tasks if not item.is_completed]
     task_lines = [
         f"- {item.title} priority={item.priority} deadline={_time_label(item.deadline_ms)}"
         for item in sorted(unfinished, key=lambda item: (-item.priority, item.deadline_ms or 0))[:8]
+    ]
+    schedule_lines = [
+        f"- {_item_time_label(item)} {item.title} status={item.status} priority={item.priority}"
+        for item in items[:8]
     ]
     return "\n".join(
         [
@@ -469,6 +697,9 @@ def _agent_prompt(
             "",
             "未完成任务：",
             *task_lines,
+            "",
+            "今日排程：",
+            *schedule_lines,
             "",
             "手机状态摘要：",
             _phone_summary(phone_status),
@@ -503,6 +734,20 @@ def _required_list(payload: dict[str, Any], name: str) -> list[Any]:
     return value
 
 
+def _required_bool(payload: dict[str, Any], name: str, label: str) -> bool:
+    value = payload.get(name)
+    if not isinstance(value, bool):
+        raise SchedulePayloadError(f"{label}.{name} must be a boolean")
+    return value
+
+
+def _required_int(payload: dict[str, Any], name: str, label: str) -> int:
+    value = payload.get(name)
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise SchedulePayloadError(f"{label}.{name} must be an integer")
+    return value
+
+
 def _optional_object(value: Any) -> dict[str, Any] | None:
     if value is None:
         return None
@@ -534,6 +779,14 @@ def _coerce_priority(value: Any) -> int:
     return 3
 
 
+def _coerce_non_negative_int(value: Any, *, default: int) -> int:
+    if isinstance(value, bool):
+        return default
+    if isinstance(value, int):
+        return max(value, 0)
+    return default
+
+
 def _energy_percent(phone_status: dict[str, Any]) -> int:
     battery = _optional_int(phone_status.get("battery_percent"))
     if battery is None:
@@ -559,6 +812,15 @@ def _time_label(ms: int | None) -> str:
     if ms is None:
         return "--:--"
     return datetime.fromtimestamp(ms / 1000).strftime("%H:%M")
+
+
+def _item_time_label(item: ScheduleTask | ScheduleEntry) -> str:
+    if isinstance(item, ScheduleEntry) and item.start_time_ms is not None:
+        start = _time_label(item.start_time_ms)
+        if item.end_time_ms is not None:
+            return f"{start}-{_time_label(item.end_time_ms)}"
+        return start
+    return _time_label(item.deadline_ms)
 
 
 def _date_label(ms: int) -> str:
