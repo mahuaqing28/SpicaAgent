@@ -110,11 +110,28 @@ def _handler_factory(
                     except Exception:
                         LOGGER.exception("Failed to send phone notification")
 
+            schedule_reminder_count = 0
+            if schedule_store is not None:
+                snapshot = _latest_phone_snapshot(payload)
+                if snapshot is not None:
+                    reminders = schedule_store.process_phone_status(snapshot)
+                    for reminder in reminders:
+                        schedule_reminder_count += 1
+                        for chat_id in notify_chat_ids:
+                            try:
+                                if schedule_reminder_callback is not None:
+                                    schedule_reminder_callback(chat_id, reminder)
+                                else:
+                                    telegram.send_message(chat_id, reminder.text)
+                            except Exception:
+                                LOGGER.exception("Failed to send schedule reminder")
+
             self._send_json(
                 200,
                 {
                     "ok": True,
                     "accepted_event_ids": result.accepted_event_ids,
+                    "schedule_reminder_count": schedule_reminder_count,
                 },
             )
 
@@ -200,3 +217,33 @@ def _handler_factory(
             self.wfile.write(body)
 
     return PhoneRequestHandler
+
+
+def _latest_phone_snapshot(payload: dict[str, Any]) -> dict[str, Any] | None:
+    device_id = str(payload.get("device_id") or "").strip()
+    events = payload.get("events")
+    if not isinstance(events, list):
+        return None
+
+    latest: dict[str, Any] | None = None
+    latest_at = -1
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        snapshot = event.get("snapshot")
+        if not isinstance(snapshot, dict):
+            continue
+        occurred_at_ms = event.get("occurred_at_ms")
+        collected_at_ms = event.get("collected_at_ms")
+        if not isinstance(occurred_at_ms, int) or not isinstance(collected_at_ms, int):
+            continue
+        event_at = max(occurred_at_ms, collected_at_ms)
+        if event_at < latest_at:
+            continue
+        latest_at = event_at
+        latest = dict(snapshot)
+        latest["device_id"] = device_id
+        latest["event_type"] = str(event.get("type") or "status")
+        latest["occurred_at_ms"] = occurred_at_ms
+        latest["collected_at_ms"] = collected_at_ms
+    return latest

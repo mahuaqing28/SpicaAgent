@@ -79,6 +79,7 @@ class ConfigTests(unittest.TestCase):
             path = Path(tmp)
             state_file = path / "schedule.json"
             share_file = path / "status.json"
+            agent_dir = path / "agent-schedule"
             env = self.make_base_env(path)
             env.update(
                 {
@@ -86,6 +87,8 @@ class ConfigTests(unittest.TestCase):
                     "SCHEDULE_BRIDGE_ENABLED": "true",
                     "SCHEDULE_STATE_FILE": str(state_file),
                     "SCHEDULE_STATESHARE_FILE": str(share_file),
+                    "SCHEDULE_AGENT_DIR": str(agent_dir),
+                    "SCHEDULE_AGENT_HISTORY_DAYS": "5",
                     "SCHEDULE_NON_WORK_PACKAGES": "com.video,com.social",
                     "SCHEDULE_NON_WORK_THRESHOLD_MINUTES": "15",
                     "SCHEDULE_REMINDER_COOLDOWN_MINUTES": "45",
@@ -98,6 +101,8 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.schedule_bridge_token, "shared-secret")
         self.assertEqual(config.schedule_state_file, state_file.resolve())
         self.assertEqual(config.schedule_stateshare_file, share_file.resolve())
+        self.assertEqual(config.schedule_agent_dir, agent_dir.resolve())
+        self.assertEqual(config.schedule_agent_history_days, 5)
         self.assertEqual(
             config.schedule_non_work_packages,
             frozenset({"com.video", "com.social"}),

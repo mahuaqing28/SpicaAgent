@@ -126,6 +126,52 @@ class PhoneHttpServerTests(unittest.TestCase):
         self.assertEqual(data["accepted_event_ids"], ["event-1"])
         self.assertTrue(self.telegram.sent)
 
+    def test_phone_events_update_schedule_store_and_invoke_reminder_callback(self) -> None:
+        now_ms = int(time.time() * 1000)
+        self.schedule_store.process_snapshot(
+            {
+                "device_id": "device-1",
+                "today": "2026-06-04",
+                "sent_at_ms": now_ms,
+                "tasks": [task_payload("task-1", "写项目报告", now_ms)],
+                "schedules": [],
+            },
+            now_ms=now_ms,
+        )
+
+        status, data = self.post(
+            {
+                "device_id": "device-1",
+                "events": [
+                    {
+                        "event_id": "event-1",
+                        "occurred_at_ms": now_ms + 60_000,
+                        "collected_at_ms": now_ms + 60_000,
+                        "type": "status",
+                        "snapshot": {
+                            "manufacturer": "Google",
+                            "model": "Pixel",
+                            "battery_percent": 90,
+                            "is_charging": False,
+                            "recent_apps": [
+                                {
+                                    "package_name": "com.video",
+                                    "app_name": "Video",
+                                    "total_time_ms": 25 * 60 * 1000,
+                                }
+                            ],
+                        },
+                    }
+                ],
+            }
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(data["schedule_reminder_count"], 1)
+        self.assertEqual(self.schedule_callbacks[0][0], 42)
+        self.assertIn("写项目报告", self.schedule_callbacks[0][1].text)
+        self.assertIn("Video", self.schedule_callbacks[0][1].agent_prompt)
+
     def test_rejects_bad_token(self) -> None:
         status, data = self.post({"device_id": "device-1", "events": []}, token="bad")
 

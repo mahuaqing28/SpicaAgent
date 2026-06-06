@@ -200,17 +200,17 @@ class BridgeApp:
             return
 
         if command == "/ask_day":
-            schedule_status = (
-                "日程接收端未启用。"
-                if self._schedule_store is None
-                else self._schedule_store.format_status()
-            )
             question = _command_argument(text) or "请根据当前日程和手机状态，判断我现在该做什么。"
+            prompt = (
+                _schedule_context_message("日程接收端未启用。", question)
+                if self._schedule_store is None
+                else self._schedule_store.agent_context_message(question)
+            )
             queue_position = self._worker.enqueue(
                 WorkItem(
                     chat_id=message.chat_id,
                     message_id=message.message_id,
-                    text=_schedule_context_message(schedule_status, question),
+                    text=prompt,
                 )
             )
             self._telegram.send_message(
@@ -597,6 +597,8 @@ def main() -> int:
             non_work_packages=config.schedule_non_work_packages,
             non_work_threshold_minutes=config.schedule_non_work_threshold_minutes,
             reminder_cooldown_minutes=config.schedule_reminder_cooldown_minutes,
+            agent_schedule_dir=config.schedule_agent_dir,
+            agent_history_days=config.schedule_agent_history_days,
         )
         LOGGER.info("Schedule bridge enabled with state file %s", config.schedule_state_file)
     if config.phone_bridge_enabled:

@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import Lock
 from typing import Any
@@ -92,12 +92,18 @@ class ScheduleStateStore:
         non_work_packages: frozenset[str] = frozenset(),
         non_work_threshold_minutes: int = 20,
         reminder_cooldown_minutes: int = 120,
+        agent_schedule_dir: Path | None = None,
+        agent_history_days: int = 7,
     ) -> None:
         self._lock = Lock()
         self._state_file = state_file.expanduser().resolve() if state_file else None
         self._state_share_file = (
             state_share_file.expanduser().resolve() if state_share_file else None
         )
+        self._agent_schedule_dir = (
+            agent_schedule_dir.expanduser().resolve() if agent_schedule_dir else None
+        )
+        self._agent_history_days = max(agent_history_days, 1)
         self._non_work_packages = non_work_packages
         self._non_work_threshold_ms = non_work_threshold_minutes * 60 * 1000
         self._reminder_cooldown_ms = reminder_cooldown_minutes * 60 * 1000
@@ -108,6 +114,7 @@ class ScheduleStateStore:
         self._timezone = "Asia/Shanghai"
         self._today = ""
         self._updated_at_ms = 0
+        self._phone_updated_at_ms = 0
         self._reminder_at: dict[str, int] = {}
         self._load()
 
@@ -128,13 +135,16 @@ class ScheduleStateStore:
             self._schedules = {schedule.id: schedule for schedule in schedules}
             if phone_status is not None:
                 self._phone_status = phone_status
+                self._phone_updated_at_ms = sent_at_ms
             self._device_id = device_id
             self._timezone = timezone_name
             self._today = today
             self._updated_at_ms = sent_at_ms
+            self._write_agent_files_locked(now)
             reminders = self._reminders_for_locked(now)
             self._save_locked()
             self._write_state_share_locked(now)
+            self._write_agent_files_locked(now)
 
         return ScheduleProcessResult(
             accepted_task_ids=[task.id for task in tasks],
@@ -172,19 +182,42 @@ class ScheduleStateStore:
                     self._schedules[schedule_id] = _schedule_with_task(schedule, task)
             if phone_status is not None:
                 self._phone_status = phone_status
+                self._phone_updated_at_ms = sent_at_ms
             self._device_id = device_id
             self._timezone = timezone_name
             self._today = today
             self._updated_at_ms = sent_at_ms
+            self._write_agent_files_locked(now)
             reminders = self._reminders_for_locked(now)
             self._save_locked()
             self._write_state_share_locked(now)
+            self._write_agent_files_locked(now)
 
         return ScheduleProcessResult(
             accepted_task_ids=[task.id for task in changed_tasks],
             accepted_schedule_ids=[schedule.id for schedule in changed_schedules],
             reminders=reminders,
         )
+
+    def process_phone_status(
+        self, phone_status: dict[str, Any], *, now_ms: int | None = None
+    ) -> list[ScheduleReminder]:
+        now = _now_ms() if now_ms is None else now_ms
+        snapshot = _optional_object(phone_status)
+        if snapshot is None:
+            return []
+
+        with self._lock:
+            self._phone_status = snapshot
+            self._phone_updated_at_ms = now
+            if not self._today:
+                self._today = _date_label(now)
+            self._write_agent_files_locked(now)
+            reminders = self._reminders_for_locked(now)
+            self._save_locked()
+            self._write_state_share_locked(now)
+            self._write_agent_files_locked(now)
+            return reminders
 
     def format_status(self) -> str:
         with self._lock:
@@ -221,6 +254,7 @@ class ScheduleStateStore:
                 "timezone": self._timezone,
                 "today": self._today,
                 "updated_at_ms": self._updated_at_ms,
+                "phone_updated_at_ms": self._phone_updated_at_ms,
                 "progress": _progress_payload(self._display_items_locked()),
                 "tasks": [_task_to_json(task) for task in tasks],
                 "schedules": [_schedule_to_json(schedule) for schedule in schedules],
@@ -240,7 +274,40 @@ class ScheduleStateStore:
             if reminders:
                 self._save_locked()
                 self._write_state_share_locked(now)
+                self._write_agent_files_locked(now)
             return reminders
+
+    def agent_context_message(self, question: str) -> str:
+        with self._lock:
+            self._write_agent_files_locked(_now_ms())
+            if self._agent_schedule_dir is None:
+                schedule_status = self._format_status_for_display_locked()
+                return "\n".join(
+                    [
+                        "以下是 SpicaAgent bridge 当前记录的日程状态：",
+                        schedule_status,
+                        "",
+                        "用户问题：",
+                        question,
+                    ]
+                )
+            hint_lines = self._agent_file_hint_lines_locked()
+            summary = self._format_status_locked(
+                self._display_items_locked(),
+                self._phone_status,
+            )
+        return "\n".join(
+            [
+                "请根据 SpicaAgent 已同步到工作目录的日程文件回答用户问题。",
+                "优先读取这些文件，而不是依赖本条消息中的摘要：",
+                *hint_lines,
+                "",
+                f"当前简要摘要：{summary}",
+                "",
+                "用户问题：",
+                question,
+            ]
+        )
 
     def _reminders_for_locked(self, now_ms: int) -> list[ScheduleReminder]:
         reminders = self._due_schedule_reminders_locked(now_ms)
@@ -272,8 +339,7 @@ class ScheduleStateStore:
                     agent_prompt=_agent_prompt(
                         top_task,
                         app,
-                        list(self._tasks.values()),
-                        self._display_items_locked(),
+                        self._agent_file_hint_lines_locked(),
                         self._phone_status,
                     ),
                 )
@@ -335,6 +401,7 @@ class ScheduleStateStore:
         self._timezone = str(data.get("timezone") or "Asia/Shanghai")
         self._today = str(data.get("today") or "")
         self._updated_at_ms = _optional_int(data.get("updated_at_ms")) or 0
+        self._phone_updated_at_ms = _optional_int(data.get("phone_updated_at_ms")) or 0
         reminder_at = data.get("reminder_at")
         if isinstance(reminder_at, dict):
             self._reminder_at = {
@@ -352,6 +419,7 @@ class ScheduleStateStore:
             "timezone": self._timezone,
             "today": self._today,
             "updated_at_ms": self._updated_at_ms,
+            "phone_updated_at_ms": self._phone_updated_at_ms,
             "phone_status": self._phone_status,
             "tasks": [_task_to_json(task) for task in self._tasks.values()],
             "schedules": [_schedule_to_json(schedule) for schedule in self._schedules.values()],
@@ -361,6 +429,142 @@ class ScheduleStateStore:
             json.dumps(payload, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
+
+    def _write_agent_files_locked(self, now_ms: int) -> None:
+        if self._agent_schedule_dir is None:
+            return
+        try:
+            root = self._agent_schedule_dir
+            daily_dir = root / "daily"
+            root.mkdir(parents=True, exist_ok=True)
+            daily_dir.mkdir(parents=True, exist_ok=True)
+
+            _write_json_file(root / "current.json", self._agent_current_payload_locked(now_ms))
+            _write_json_file(
+                root / "tasks.json",
+                {
+                    "generated_at_ms": now_ms,
+                    "generated_at": _format_time(now_ms),
+                    "updated_at_ms": self._updated_at_ms,
+                    "updated_at": (
+                        _format_time(self._updated_at_ms)
+                        if self._updated_at_ms
+                        else "unknown"
+                    ),
+                    "tasks": [
+                        _task_to_json(task) for task in self._sorted_tasks_locked()
+                    ],
+                },
+            )
+            for date, payload in self._daily_payloads_locked(now_ms).items():
+                _write_json_file(daily_dir / f"{date}.json", payload)
+            _write_text_file(root / "today.md", self._today_markdown_locked(now_ms))
+            _prune_daily_files(daily_dir, self._agent_history_days, now_ms)
+        except OSError:
+            return
+
+    def _agent_current_payload_locked(self, now_ms: int) -> dict[str, Any]:
+        items = self._display_items_locked()
+        return {
+            "generated_at_ms": now_ms,
+            "generated_at": _format_time(now_ms),
+            "device_id": self._device_id,
+            "timezone": self._timezone,
+            "today": self._today or _date_label(now_ms),
+            "updated_at_ms": self._updated_at_ms,
+            "updated_at": _format_time(self._updated_at_ms) if self._updated_at_ms else "unknown",
+            "phone_updated_at_ms": self._phone_updated_at_ms,
+            "phone_updated_at": (
+                _format_time(self._phone_updated_at_ms)
+                if self._phone_updated_at_ms
+                else "unknown"
+            ),
+            "progress": _progress_payload(items),
+            "summary": self._format_status_locked(items, self._phone_status),
+            "phone_status": self._phone_status,
+            "tasks": [_task_to_json(task) for task in self._sorted_tasks_locked()],
+            "schedules": [
+                _schedule_to_json(schedule) for schedule in self._sorted_schedules_locked()
+            ],
+            "display_items": [_item_to_agent_json(item) for item in items],
+        }
+
+    def _daily_payloads_locked(self, now_ms: int) -> dict[str, dict[str, Any]]:
+        today = self._today or _date_label(now_ms)
+        dates = {today}
+        for schedule in self._schedules.values():
+            if schedule.date:
+                dates.add(schedule.date)
+
+        payloads: dict[str, dict[str, Any]] = {}
+        for date in sorted(dates):
+            if date == today:
+                items = self._display_items_locked()
+            else:
+                items = [
+                    schedule
+                    for schedule in self._sorted_schedules_locked()
+                    if schedule.date == date
+                ]
+            payloads[date] = {
+                "date": date,
+                "generated_at_ms": now_ms,
+                "generated_at": _format_time(now_ms),
+                "updated_at_ms": self._updated_at_ms,
+                "progress": _progress_payload(items),
+                "summary": self._format_status_locked(items, self._phone_status),
+                "items": [_item_to_agent_json(item) for item in items],
+                "schedules": [
+                    _schedule_to_json(schedule)
+                    for schedule in self._sorted_schedules_locked()
+                    if schedule.date == date
+                ],
+            }
+        return payloads
+
+    def _today_markdown_locked(self, now_ms: int) -> str:
+        items = self._display_items_locked()
+        progress = _progress_payload(items)
+        lines = [
+            "# Spica Schedule",
+            "",
+            f"- Generated: {_format_time(now_ms)}",
+            f"- Today: {self._today or _date_label(now_ms)}",
+            f"- Updated: {_format_time(self._updated_at_ms) if self._updated_at_ms else 'unknown'}",
+            f"- Phone updated: {_format_time(self._phone_updated_at_ms) if self._phone_updated_at_ms else 'unknown'}",
+            f"- Progress: {progress['done']}/{progress['total']}",
+        ]
+        focus = _foreground_label(self._phone_status)
+        if focus:
+            lines.append(f"- Recent app: {focus}")
+        lines.extend(["", "## Current Items"])
+        if not items:
+            lines.append("- No schedule data received yet.")
+        for item in items[:24]:
+            marker = "x" if item.status == "done" else " "
+            lines.append(
+                f"- [{marker}] {_item_time_label(item)} P{item.priority} {item.title}"
+            )
+        lines.extend(
+            [
+                "",
+                "## Files",
+                f"- current: {self._agent_schedule_dir / 'current.json' if self._agent_schedule_dir else 'current.json'}",
+                f"- tasks: {self._agent_schedule_dir / 'tasks.json' if self._agent_schedule_dir else 'tasks.json'}",
+                f"- daily: {self._agent_schedule_dir / 'daily' if self._agent_schedule_dir else 'daily'}",
+            ]
+        )
+        return "\n".join(lines) + "\n"
+
+    def _agent_file_hint_lines_locked(self) -> list[str]:
+        if self._agent_schedule_dir is None:
+            return ["- 日程文件未配置，请使用本条消息中的摘要。"]
+        return [
+            f"- {self._agent_schedule_dir / 'today.md'}",
+            f"- {self._agent_schedule_dir / 'current.json'}",
+            f"- {self._agent_schedule_dir / 'tasks.json'}",
+            f"- {self._agent_schedule_dir / 'daily'}",
+        ]
 
     def _write_state_share_locked(self, now_ms: int) -> None:
         if self._state_share_file is None:
@@ -387,6 +591,27 @@ class ScheduleStateStore:
         if active is not None:
             parts.append(f"下一项 {active.title}")
         return "，".join(parts)
+
+    def _format_status_for_display_locked(self) -> str:
+        items = self._display_items_locked()
+        if not items:
+            return "尚未收到日程同步。"
+
+        total = len(items)
+        done = sum(1 for item in items if item.status == "done")
+        lines = [
+            "当前日程状态：",
+            f"更新: {_format_time(self._updated_at_ms) if self._updated_at_ms else 'unknown'}",
+            f"进度: {done}/{total}",
+        ]
+        focus = _foreground_label(self._phone_status)
+        if focus:
+            lines.append(f"最近应用: {focus}")
+        lines.append("")
+        for item in items[:12]:
+            marker = "x" if item.status == "done" else ">"
+            lines.append(f"- [{marker}] {_item_time_label(item)} {item.title} P{item.priority}")
+        return "\n".join(lines)
 
     def _state_share_payload_locked(self, now_ms: int) -> dict[str, Any]:
         items = self._display_items_locked()
@@ -573,6 +798,20 @@ def _schedule_to_json(schedule: ScheduleEntry) -> dict[str, Any]:
     }
 
 
+def _item_to_agent_json(item: ScheduleTask | ScheduleEntry) -> dict[str, Any]:
+    if isinstance(item, ScheduleEntry):
+        payload = _schedule_to_json(item)
+        payload["kind"] = "schedule"
+        payload["time_label"] = _item_time_label(item)
+        payload["status"] = item.status
+        return payload
+    payload = _task_to_json(item)
+    payload["kind"] = "task"
+    payload["time_label"] = _item_time_label(item)
+    payload["status"] = item.status
+    return payload
+
+
 def _schedule_with_task(schedule: ScheduleEntry, task: ScheduleTask) -> ScheduleEntry:
     return ScheduleEntry(
         id=schedule.id,
@@ -645,6 +884,8 @@ def _distracting_apps(
     non_work_packages: frozenset[str],
     threshold_ms: int,
 ) -> list[dict[str, Any]]:
+    if not non_work_packages:
+        return []
     apps = phone_status.get("recent_apps")
     if not isinstance(apps, list):
         return []
@@ -655,7 +896,7 @@ def _distracting_apps(
         package = str(item.get("package_name") or item.get("package") or "").strip()
         if not package:
             continue
-        if non_work_packages and package not in non_work_packages:
+        if package not in non_work_packages:
             continue
         total_time_ms = _optional_int(item.get("total_time_ms")) or 0
         if total_time_ms < threshold_ms:
@@ -673,33 +914,26 @@ def _distracting_apps(
 def _agent_prompt(
     task: ScheduleTask,
     app: dict[str, Any],
-    tasks: list[ScheduleTask],
-    items: list[ScheduleTask | ScheduleEntry],
+    file_hint_lines: list[str],
     phone_status: dict[str, Any],
 ) -> str:
-    unfinished = [item for item in tasks if not item.is_completed]
-    task_lines = [
-        f"- {item.title} priority={item.priority} deadline={_time_label(item.deadline_ms)}"
-        for item in sorted(unfinished, key=lambda item: (-item.priority, item.deadline_ms or 0))[:8]
-    ]
-    schedule_lines = [
-        f"- {_item_time_label(item)} {item.title} status={item.status} priority={item.priority}"
-        for item in items[:8]
-    ]
     return "\n".join(
         [
-            "你是 Spica 的日程监督 agent。请判断是否需要给用户发一个简短提醒，并直接给出提醒文案。",
+            "你是 Spica 的日程监督 agent。请先读取工作目录中的日程文件，再判断是否需要给用户发一个简短提醒，并直接给出提醒文案。",
             "",
-            "当前风险：",
+            "触发原因：",
             f"- 关键任务：{task.title}",
+            f"- 优先级：P{task.priority}",
+            f"- deadline：{_time_label(task.deadline_ms)}",
             f"- 非工作应用：{app['app_name']} ({app['package_name']})",
             f"- 最近使用：{int(app['total_time_ms'] // 60000)} 分钟",
             "",
-            "未完成任务：",
-            *task_lines,
+            "请读取这些文件获取完整任务库、今日日程和手机状态：",
+            *file_hint_lines,
             "",
-            "今日排程：",
-            *schedule_lines,
+            "提醒策略：",
+            "- 如果确实需要介入，只输出一条自然、短促、可执行的提醒。",
+            "- 如果不需要介入，输出一句“不提醒”并说明极短理由。",
             "",
             "手机状态摘要：",
             _phone_summary(phone_status),
@@ -711,6 +945,50 @@ def _phone_summary(phone_status: dict[str, Any]) -> str:
     battery = phone_status.get("battery_percent", "unknown")
     foreground = _foreground_label(phone_status) or "unknown"
     return f"battery={battery}, foreground={foreground}"
+
+
+def _write_json_file(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def _write_text_file(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+
+
+def _prune_daily_files(daily_dir: Path, history_days: int, now_ms: int) -> None:
+    today = _date_label(now_ms)
+    dated_files: list[tuple[str, Path]] = []
+    for path in daily_dir.glob("*.json"):
+        date = path.stem
+        try:
+            datetime.strptime(date, "%Y-%m-%d")
+        except ValueError:
+            continue
+        dated_files.append((date, path))
+
+    dated_files.sort()
+    keep_dates = {date for date, _ in dated_files[-history_days:]}
+    cutoff = _date_before(today, history_days - 1)
+    for date, path in dated_files:
+        if date in keep_dates and date >= cutoff:
+            continue
+        try:
+            path.unlink()
+        except OSError:
+            continue
+
+
+def _date_before(date: str, days: int) -> str:
+    try:
+        parsed = datetime.strptime(date, "%Y-%m-%d")
+    except ValueError:
+        return date
+    return (parsed - timedelta(days=days)).strftime("%Y-%m-%d")
 
 
 def _foreground_label(phone_status: dict[str, Any]) -> str:

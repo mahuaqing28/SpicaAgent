@@ -135,6 +135,8 @@ class AppConfig:
     schedule_bridge_token: str
     schedule_state_file: Path
     schedule_stateshare_file: Path | None
+    schedule_agent_dir: Path
+    schedule_agent_history_days: int
     schedule_non_work_packages: frozenset[str]
     schedule_non_work_threshold_minutes: int
     schedule_reminder_cooldown_minutes: int
@@ -290,6 +292,14 @@ class AppConfig:
             .resolve(),
             schedule_stateshare_file=(
                 Path(state_share_raw).expanduser().resolve() if state_share_raw else None
+            ),
+            schedule_agent_dir=Path(
+                source.get("SCHEDULE_AGENT_DIR", str(claude_workdir / "schedule"))
+            )
+            .expanduser()
+            .resolve(),
+            schedule_agent_history_days=_parse_int(
+                source, "SCHEDULE_AGENT_HISTORY_DAYS", 7, minimum=1
             ),
             schedule_non_work_packages=_parse_strings(
                 source.get("SCHEDULE_NON_WORK_PACKAGES", "")

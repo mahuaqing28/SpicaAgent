@@ -15,12 +15,20 @@ export PHONE_BRIDGE_HOST=127.0.0.1
 export PHONE_BRIDGE_PORT=8765
 export SCHEDULE_STATE_FILE=/tmp/spica-agent/schedule-state.json
 export SCHEDULE_STATESHARE_FILE=/home/mahuaqing/personnalProject/stateShare/data/status.json
+export SCHEDULE_AGENT_DIR=/home/mahuaqing/personnalProject/SpicaAgent/schedule
+export SCHEDULE_AGENT_HISTORY_DAYS=7
 export SCHEDULE_NON_WORK_PACKAGES="com.google.android.youtube,com.instagram.android"
 export SCHEDULE_REMINDER_CHECK_INTERVAL_SECONDS=60
 ```
 
 If phone status sync and schedule sync come from the same Android device,
 `SCHEDULE_BRIDGE_TOKEN` may be omitted and `PHONE_BRIDGE_TOKEN` will be reused.
+
+The bridge writes agent-readable context files to `SCHEDULE_AGENT_DIR`:
+`current.json`, `tasks.json`, `today.md`, and `daily/YYYY-MM-DD.json`. The daily
+JSON files are pruned to `SCHEDULE_AGENT_HISTORY_DAYS` days. Agent prompts only
+carry the trigger reason and these paths, so Claude can inspect the current
+files when it needs full task/schedule context.
 
 ## Android Client Configuration
 
@@ -227,6 +235,9 @@ workers and show a short UI status for manual sync.
 The server also checks stored schedules every
 `SCHEDULE_REMINDER_CHECK_INTERVAL_SECONDS` seconds, so configured schedule
 reminders can fire even when the phone is not syncing at that exact moment.
+Phone status events posted to `/api/phone/events` are also merged into the
+schedule store, so `time-is-money-app` does not need to duplicate UsageStats
+collection for non-work app detection.
 
 ## Acceptance Checklist
 
@@ -236,4 +247,6 @@ reminders can fire even when the phone is not syncing at that exact moment.
 - Periodic sync refreshes Spica's `/schedule` output.
 - If a configured non-work app exceeds the threshold while a risky task is open,
   Spica sends a Telegram notice and queues an agent prompt.
+- Agent-readable files under `SCHEDULE_AGENT_DIR` refresh after each full sync
+  and contain the current task database plus the retained daily schedule files.
 - `stateShare/data/status.json` is updated without exposing package names.

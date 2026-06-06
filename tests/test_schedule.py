@@ -71,27 +71,31 @@ def phone_status(*, package_name: str = "com.video", minutes: int = 25) -> dict:
 
 class ScheduleStateStoreTests(unittest.TestCase):
     def test_snapshot_triggers_reminder_for_risky_task_and_non_work_app(self) -> None:
-        store = ScheduleStateStore(
-            non_work_packages=frozenset({"com.video"}),
-            non_work_threshold_minutes=20,
-            reminder_cooldown_minutes=120,
-        )
+        with tempfile.TemporaryDirectory() as tmp:
+            agent_dir = Path(tmp) / "schedule"
+            store = ScheduleStateStore(
+                non_work_packages=frozenset({"com.video"}),
+                non_work_threshold_minutes=20,
+                reminder_cooldown_minutes=120,
+                agent_schedule_dir=agent_dir,
+            )
 
-        result = store.process_snapshot(
-            {
-                "device_id": "phone-1",
-                "today": "2023-11-14",
-                "tasks": [task("1", "写项目报告")],
-                "schedules": [],
-                "phone_status": phone_status(),
-            },
-            now_ms=NOW,
-        )
+            result = store.process_snapshot(
+                {
+                    "device_id": "phone-1",
+                    "today": "2023-11-14",
+                    "tasks": [task("1", "写项目报告")],
+                    "schedules": [],
+                    "phone_status": phone_status(),
+                },
+                now_ms=NOW,
+            )
 
-        self.assertEqual(result.accepted_task_ids, ["1"])
-        self.assertEqual(len(result.reminders), 1)
-        self.assertIn("写项目报告", result.reminders[0].text)
-        self.assertIn("Video", result.reminders[0].agent_prompt)
+            self.assertEqual(result.accepted_task_ids, ["1"])
+            self.assertEqual(len(result.reminders), 1)
+            self.assertIn("写项目报告", result.reminders[0].text)
+            self.assertIn("Video", result.reminders[0].agent_prompt)
+            self.assertIn(str(agent_dir / "current.json"), result.reminders[0].agent_prompt)
 
     def test_reminder_has_cooldown(self) -> None:
         store = ScheduleStateStore(
@@ -140,6 +144,77 @@ class ScheduleStateStoreTests(unittest.TestCase):
 
         self.assertEqual(result.reminders, [])
         self.assertEqual(short.reminders, [])
+
+    def test_requires_configured_non_work_packages_for_agent_reminder(self) -> None:
+        store = ScheduleStateStore(non_work_threshold_minutes=20)
+
+        result = store.process_snapshot(
+            {
+                "tasks": [task("1", "写项目报告")],
+                "schedules": [],
+                "phone_status": phone_status(package_name="com.video", minutes=40),
+            },
+            now_ms=NOW,
+        )
+
+        self.assertEqual(result.reminders, [])
+
+    def test_phone_status_update_can_trigger_risky_task_reminder(self) -> None:
+        store = ScheduleStateStore(
+            non_work_packages=frozenset({"com.video"}),
+            non_work_threshold_minutes=20,
+        )
+        store.process_snapshot(
+            {
+                "device_id": "phone-1",
+                "today": "2023-11-14",
+                "tasks": [task("1", "写项目报告")],
+                "schedules": [],
+            },
+            now_ms=NOW,
+        )
+
+        reminders = store.process_phone_status(phone_status(), now_ms=NOW + 60_000)
+
+        self.assertEqual(len(reminders), 1)
+        self.assertIn("写项目报告", reminders[0].text)
+        self.assertIn("Video", reminders[0].agent_prompt)
+
+    def test_writes_agent_schedule_files_and_prunes_old_daily_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            agent_dir = Path(tmp) / "schedule"
+            daily_dir = agent_dir / "daily"
+            daily_dir.mkdir(parents=True)
+            old_file = daily_dir / "2023-11-01.json"
+            old_file.write_text("{}", encoding="utf-8")
+            keep_file = daily_dir / "2023-11-13.json"
+            keep_file.write_text("{}", encoding="utf-8")
+            store = ScheduleStateStore(agent_schedule_dir=agent_dir, agent_history_days=7)
+
+            store.process_snapshot(
+                {
+                    "device_id": "phone-1",
+                    "today": "2023-11-14",
+                    "sent_at_ms": NOW,
+                    "tasks": [task("1", "写项目报告")],
+                    "schedules": [schedule("s1", "1", date="2023-11-14")],
+                    "phone_status": phone_status(package_name="com.video", minutes=25),
+                },
+                now_ms=NOW,
+            )
+
+            self.assertTrue((agent_dir / "current.json").is_file())
+            self.assertTrue((agent_dir / "tasks.json").is_file())
+            self.assertTrue((agent_dir / "today.md").is_file())
+            self.assertTrue((daily_dir / "2023-11-14.json").is_file())
+            self.assertTrue(keep_file.is_file())
+            self.assertFalse(old_file.exists())
+
+            current = json.loads((agent_dir / "current.json").read_text(encoding="utf-8"))
+            tasks = json.loads((agent_dir / "tasks.json").read_text(encoding="utf-8"))
+            self.assertEqual(current["progress"]["total"], 1)
+            self.assertEqual(tasks["tasks"][0]["title"], "写项目报告")
+            self.assertIn("写项目报告", (agent_dir / "today.md").read_text(encoding="utf-8"))
 
     def test_persists_state_and_writes_public_stateshare_without_app_details(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
