@@ -8,7 +8,7 @@ from spica_agent.app import BridgeApp
 from spica_agent.config import AppConfig
 from spica_agent.files import SpicaFileStore
 from spica_agent.phone import PhoneStateStore
-from spica_agent.schedule import ScheduleStateStore
+from spica_agent.schedule import ScheduleReminder, ScheduleStateStore
 from spica_agent.telegram import TelegramAttachment, TelegramMessage
 from spica_agent.worker import WorkerStatus
 
@@ -80,6 +80,7 @@ class AppTests(unittest.TestCase):
         file_root: Path | None = None,
         output_root: Path | None = None,
         files_enabled: bool = False,
+        agent_enabled: bool = True,
     ) -> AppConfig:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp)
@@ -90,6 +91,7 @@ class AppTests(unittest.TestCase):
                 "TELEGRAM_ALLOWED_CHAT_IDS": allowed,
                 "CLAUDE_WORKDIR": str(path),
                 "CLAUDE_ENV_FILE": str(env_file),
+                "CLAUDE_AGENT_ENABLED": "true" if agent_enabled else "false",
                 "SPICA_FILES_ENABLED": "true" if files_enabled else "false",
             }
             if file_root is not None:
@@ -170,6 +172,26 @@ class AppTests(unittest.TestCase):
         app.handle_message(TelegramMessage(1, 42, 7, "/key d"))
 
         self.assertEqual(worker.keys, ["d"])
+
+    def test_agent_disabled_rejects_text_without_queueing(self) -> None:
+        telegram = FakeTelegram()
+        worker = FakeWorker()
+        app = BridgeApp(self.make_config("42", agent_enabled=False), telegram, worker)
+
+        app.handle_message(TelegramMessage(1, 42, 7, "hello"))
+
+        self.assertEqual(worker.items, [])
+        self.assertIn("Claude agent 未启用", telegram.sent[-1][1])
+
+    def test_agent_disabled_rejects_key_without_sending(self) -> None:
+        telegram = FakeTelegram()
+        worker = FakeWorker()
+        app = BridgeApp(self.make_config("42", agent_enabled=False), telegram, worker)
+
+        app.handle_message(TelegramMessage(1, 42, 7, "/down"))
+
+        self.assertEqual(worker.keys, [])
+        self.assertIn("Claude agent 未启用", telegram.sent[-1][1])
 
     def test_initial_offset_drops_pending_updates(self) -> None:
         telegram = FakeTelegram()
@@ -398,6 +420,42 @@ class AppTests(unittest.TestCase):
             self.assertEqual(worker.items, [])
             self.assertIsNotNone(store.last_for_chat(42))
 
+    def test_agent_disabled_attachment_caption_is_saved_without_queueing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "files"
+            output = Path(tmp) / "out"
+            telegram = FakeTelegram()
+            telegram.downloads["photo-file"] = b"image"
+            worker = FakeWorker()
+            store = self.make_file_store(root, output)
+            app = BridgeApp(
+                self.make_config(
+                    "42",
+                    file_root=root,
+                    output_root=output,
+                    files_enabled=True,
+                    agent_enabled=False,
+                ),
+                telegram,
+                worker,
+                file_store=store,
+            )
+
+            app.handle_message(
+                TelegramMessage(
+                    1,
+                    42,
+                    7,
+                    "请分析这张图",
+                    TelegramAttachment("photo", "photo-file", "unique", "photo.jpg"),
+                )
+            )
+
+            self.assertIn("文件已保存", telegram.sent[-1][1])
+            self.assertIn("未加入队列", telegram.sent[-1][1])
+            self.assertEqual(worker.items, [])
+            self.assertIsNotNone(store.last_for_chat(42))
+
     def test_text_message_includes_recent_file_context(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "files"
@@ -476,6 +534,22 @@ class AppTests(unittest.TestCase):
 
             self.assertIn("已清除", telegram.sent[-2][1])
             self.assertEqual(worker.items[0].text, "hello")
+
+    def test_agent_disabled_schedule_reminder_sends_text_without_queueing(self) -> None:
+        telegram = FakeTelegram()
+        worker = FakeWorker()
+        app = BridgeApp(self.make_config("42", agent_enabled=False), telegram, worker)
+
+        app.enqueue_schedule_reminder(
+            42,
+            ScheduleReminder(
+                text="日程提醒候选：当前还有「写项目报告」未完成。",
+                agent_prompt="agent prompt",
+            ),
+        )
+
+        self.assertIn("Claude agent 未启用", telegram.sent[-1][1])
+        self.assertEqual(worker.items, [])
 
 
 if __name__ == "__main__":

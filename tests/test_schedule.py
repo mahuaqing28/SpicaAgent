@@ -347,6 +347,46 @@ class ScheduleStateStoreTests(unittest.TestCase):
 
             self.assertEqual(git_output(repo, "rev-list", "--count", "HEAD"), "1")
 
+    def test_stateshare_auto_commit_leaves_unrelated_staged_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "stateShare"
+            repo.mkdir()
+            init_git_repo(repo)
+            unrelated = repo / "other.txt"
+            unrelated.write_text("keep me staged", encoding="utf-8")
+            subprocess.run(
+                ["git", "add", "other.txt"],
+                cwd=repo,
+                check=True,
+                capture_output=True,
+            )
+            share_file = repo / "data" / "status.json"
+            store = ScheduleStateStore(
+                state_share_file=share_file,
+                state_share_auto_commit=True,
+                state_share_repo=repo,
+                state_share_push=False,
+            )
+
+            store.process_snapshot(
+                {
+                    "today": "2023-11-14",
+                    "sent_at_ms": NOW,
+                    "tasks": [task("1", "写项目报告")],
+                    "schedules": [schedule("s1", "1")],
+                },
+                now_ms=NOW,
+            )
+
+            committed_files = git_output(
+                repo, "show", "--name-only", "--pretty=format:", "HEAD"
+            ).splitlines()
+            self.assertIn("data/status.json", committed_files)
+            self.assertNotIn("other.txt", committed_files)
+            self.assertEqual(
+                git_output(repo, "diff", "--cached", "--name-only"), "other.txt"
+            )
+
     def test_stateshare_auto_commit_failure_does_not_fail_sync(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

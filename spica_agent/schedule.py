@@ -686,7 +686,7 @@ class ScheduleStateStore:
 
             commit = _run_git(
                 repo,
-                ["commit", "-m", f"Update status {_format_time(now_ms)}"],
+                ["commit", "-m", f"Update status {_format_time(now_ms)}", "--", relative],
                 self._state_share_commit_timeout_seconds,
             )
             if commit.returncode != 0:

@@ -44,6 +44,8 @@ IDLE_PROMPT_PATTERNS = (
     re.compile(r"^\s*>\s*$"),
 )
 
+CURRENT_TURN_FALLBACK_LINES = 120
+
 
 @dataclass(frozen=True)
 class ReplyEvent:
@@ -71,6 +73,14 @@ def find_confirmation_prompt(text: str) -> str:
         if contains_confirmation(line):
             return line
     return lines[-1] if lines else "Claude is waiting for y/n confirmation."
+
+
+def _current_turn_text(text: str) -> str:
+    lines = text.splitlines()
+    for index in range(len(lines) - 1, -1, -1):
+        if is_claude_input_line(lines[index]):
+            return "\n".join(lines[index + 1 :]).lstrip("\n")
+    return "\n".join(lines[-CURRENT_TURN_FALLBACK_LINES:]).lstrip("\n")
 
 
 def is_idle_screen(screen: str) -> bool:
@@ -121,20 +131,17 @@ class ReplyWaiter:
             self._sleep(self._poll_interval)
             screen = clean_terminal_text(self._capture_screen())
             delta = extract_new_text(baseline_screen, screen)
+            current_turn = _current_turn_text(screen)
 
-            confirmation_text = delta
-            if not contains_confirmation(confirmation_text) and contains_confirmation(screen):
-                confirmation_text = screen
-
-            if contains_confirmation(confirmation_text):
+            if contains_confirmation(current_turn):
                 return ReplyEvent(
                     kind="confirmation",
-                    text=confirmation_text,
+                    text=current_turn,
                     screen=screen,
-                    prompt=find_confirmation_prompt(confirmation_text),
+                    prompt=find_confirmation_prompt(current_turn),
                 )
 
-            if contains_interactive_menu(screen):
+            if contains_interactive_menu(current_turn):
                 interactive_stable_count = (
                     interactive_stable_count + 1 if screen == last_screen else 1
                 )

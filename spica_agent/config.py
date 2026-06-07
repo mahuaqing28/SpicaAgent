@@ -121,6 +121,7 @@ class AppConfig:
     claude_poll_interval: float
     claude_history_limit: int
     claude_capture_lines: int
+    claude_agent_enabled: bool
     phone_bridge_enabled: bool
     phone_bridge_host: str
     phone_bridge_port: int
@@ -280,6 +281,7 @@ class AppConfig:
             claude_capture_lines=_parse_int(
                 source, "CLAUDE_CAPTURE_LINES", 2000, minimum=200
             ),
+            claude_agent_enabled=_parse_bool(source, "CLAUDE_AGENT_ENABLED", False),
             phone_bridge_enabled=phone_bridge_enabled,
             phone_bridge_host=source.get("PHONE_BRIDGE_HOST", "0.0.0.0").strip()
             or "0.0.0.0",

@@ -19,7 +19,7 @@ from .phone_http import PhoneHttpServer
 from .schedule import ScheduleReminder, ScheduleStateStore
 from .telegram import TelegramClient, TelegramError, TelegramMessage
 from .tmux_bridge import TmuxBridge, TmuxError
-from .worker import ClaudeWorker, WorkItem
+from .worker import ClaudeWorker, DisabledClaudeWorker, WorkItem
 
 
 LOGGER = logging.getLogger(__name__)
@@ -68,7 +68,7 @@ class BridgeApp:
         self,
         config: AppConfig,
         telegram: TelegramClient,
-        worker: ClaudeWorker,
+        worker: ClaudeWorker | DisabledClaudeWorker,
         phone_store: PhoneStateStore | None = None,
         file_store: SpicaFileStore | None = None,
         schedule_store: ScheduleStateStore | None = None,
@@ -200,6 +200,9 @@ class BridgeApp:
             return
 
         if command == "/ask_day":
+            if not self._agent_enabled():
+                self._send_agent_disabled(message.chat_id)
+                return
             question = _command_argument(text) or "请根据当前日程和手机状态，判断我现在该做什么。"
             prompt = (
                 _schedule_context_message("日程接收端未启用。", question)
@@ -231,6 +234,9 @@ class BridgeApp:
             return
 
         if command == "/ask_phone":
+            if not self._agent_enabled():
+                self._send_agent_disabled(message.chat_id)
+                return
             phone_status = (
                 "手机状态接收端未启用。"
                 if self._phone_store is None
@@ -252,6 +258,9 @@ class BridgeApp:
             return
 
         if command == "/cancel":
+            if not self._agent_enabled():
+                self._send_agent_disabled(message.chat_id)
+                return
             if self._worker.cancel(message.chat_id):
                 self._telegram.send_message(message.chat_id, "已向 Claude 发送 Ctrl-C。")
             else:
@@ -259,21 +268,34 @@ class BridgeApp:
             return
 
         if command in {"/restart_claude", "/new_claude"}:
+            if not self._agent_enabled():
+                self._send_agent_disabled(message.chat_id)
+                return
             ok, response = self._worker.restart_claude()
             self._telegram.send_message(message.chat_id, response)
             return
 
         key = _tui_key_for_command(command, text)
         if key is not None:
+            if not self._agent_enabled():
+                self._send_agent_disabled(message.chat_id)
+                return
             ok, response = self._worker.send_tui_key(key)
             self._telegram.send_message(message.chat_id, response)
             return
 
         if command in {"/approve", "/approve_always", "/deny"}:
-            self._telegram.send_message(message.chat_id, "当前没有等待确认的 Claude 操作。")
+            if self._agent_enabled():
+                self._telegram.send_message(message.chat_id, "当前没有等待确认的 Claude 操作。")
+            else:
+                self._send_agent_disabled(message.chat_id)
             return
 
         if not text:
+            return
+
+        if not self._agent_enabled():
+            self._send_agent_disabled(message.chat_id)
             return
 
         queue_position = self._worker.enqueue(
@@ -331,6 +353,14 @@ class BridgeApp:
             f"path: {stored.path}",
         ]
         if message.text.strip():
+            if not self._agent_enabled():
+                lines.append("caption 已保存，但 Claude agent 未启用，未加入队列。")
+                self._telegram.send_message(
+                    message.chat_id,
+                    "\n".join(lines),
+                    reply_to_message_id=message.message_id,
+                )
+                return
             queue_position = self._worker.enqueue(
                 WorkItem(
                     chat_id=message.chat_id,
@@ -432,8 +462,11 @@ class BridgeApp:
             f"状态: {status.state}",
             f"当前 chat_id: {active}",
             f"队列长度: {status.queue_size}",
-            f"tmux session: {self._config.claude_tmux_session}",
         ]
+        if self._agent_enabled():
+            lines.append(f"tmux session: {self._config.claude_tmux_session}")
+        else:
+            lines.append("Claude agent: 未启用")
         if self._file_store is None:
             lines.append("文件功能: 未启用")
         else:
@@ -447,6 +480,12 @@ class BridgeApp:
         if not reminder.use_agent:
             self._telegram.send_message(chat_id, reminder.text)
             return
+        if not self._agent_enabled():
+            self._telegram.send_message(
+                chat_id,
+                f"{reminder.text}\nClaude agent 未启用，未交给 agent 生成提醒。",
+            )
+            return
         queue_position = self._worker.enqueue(
             WorkItem(
                 chat_id=chat_id,
@@ -458,6 +497,12 @@ class BridgeApp:
             chat_id,
             f"{reminder.text}\n已交给 agent 生成提醒，队列位置：{queue_position}",
         )
+
+    def _agent_enabled(self) -> bool:
+        return self._config.claude_agent_enabled
+
+    def _send_agent_disabled(self, chat_id: int) -> None:
+        self._telegram.send_message(chat_id, "Claude agent 未启用。")
 
 
 def _command_name(text: str) -> str | None:
@@ -565,20 +610,26 @@ def main() -> int:
     )
     try:
         config = AppConfig.from_env()
-        claude_env = load_env_file(config.claude_env_file)
-        claude_env.update(_forwarded_env(config))
         telegram = TelegramClient(
             config.telegram_bot_token,
             api_base=config.telegram_api_base,
         )
-        tmux = TmuxBridge(config, claude_env)
-        tmux.ensure_session()
+        if config.claude_agent_enabled:
+            claude_env = load_env_file(config.claude_env_file)
+            claude_env.update(_forwarded_env(config))
+            tmux = TmuxBridge(config, claude_env)
+            tmux.ensure_session()
     except (ConfigError, EnvFileError, TmuxError) as exc:
         LOGGER.error("%s", exc)
         return 2
 
-    worker = ClaudeWorker(config, tmux, telegram)
-    worker.start()
+    if config.claude_agent_enabled:
+        worker: ClaudeWorker | DisabledClaudeWorker = ClaudeWorker(config, tmux, telegram)
+        worker.start()
+        LOGGER.info("Claude agent enabled with tmux session %s", config.claude_tmux_session)
+    else:
+        worker = DisabledClaudeWorker()
+        LOGGER.info("Claude agent disabled; skipping tmux startup")
     phone_store: PhoneStateStore | None = None
     file_store: SpicaFileStore | None = None
     schedule_store: ScheduleStateStore | None = None

@@ -29,6 +29,29 @@ class WorkerStatus:
     queue_size: int
 
 
+class DisabledClaudeWorker:
+    def start(self) -> None:
+        return
+
+    def enqueue(self, item: WorkItem) -> int:
+        return 0
+
+    def status(self) -> WorkerStatus:
+        return WorkerStatus(state="disabled", active_chat_id=None, queue_size=0)
+
+    def provide_confirmation(self, chat_id: int, text: str) -> bool:
+        return False
+
+    def cancel(self, chat_id: int) -> bool:
+        return False
+
+    def restart_claude(self) -> tuple[bool, str]:
+        return False, "Claude agent 未启用。"
+
+    def send_tui_key(self, key: str) -> tuple[bool, str]:
+        return False, "Claude agent 未启用，不能发送 TUI 按键。"
+
+
 class ClaudeWorker:
     def __init__(
         self,

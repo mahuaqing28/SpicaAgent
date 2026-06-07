@@ -1,17 +1,17 @@
 # SpicaAgent
 
-SpicaAgent is a small Telegram bridge for Claude Code. It runs Claude in a
-background `tmux` session, pastes Telegram messages into the terminal, watches
-the pane output, and sends the result back to Telegram.
+SpicaAgent is a small Telegram bridge with optional Claude Code integration.
+When `CLAUDE_AGENT_ENABLED=true`, it runs Claude in a background `tmux` session,
+pastes Telegram messages into the terminal, watches the pane output, and sends
+the result back to Telegram.
 
 ## Requirements
 
 - Python 3.11+
-- `tmux`
-- `claude` available on `PATH`
 - A Telegram bot token
+- `tmux` and `claude` available on `PATH` when `CLAUDE_AGENT_ENABLED=true`
 
-Install `tmux` on Ubuntu:
+Install `tmux` on Ubuntu if you enable the Claude agent:
 
 ```bash
 sudo apt update
@@ -19,7 +19,7 @@ sudo apt install tmux
 ```
 
 This machine currently has `claude` available, but `tmux` must be installed
-before the bridge can start.
+before the Claude agent can start.
 
 ## Configuration
 
@@ -45,6 +45,7 @@ Defaults:
 - `CLAUDE_FORWARD_ENV_VARS=HTTP_PROXY,HTTPS_PROXY,ALL_PROXY,NO_PROXY,http_proxy,https_proxy,all_proxy,no_proxy`
 - `CLAUDE_READY_TIMEOUT=120`
 - `CLAUDE_CAPTURE_LINES=2000`
+- `CLAUDE_AGENT_ENABLED=false`
 - `PHONE_BRIDGE_ENABLED=false`
 - `PHONE_BRIDGE_HOST=0.0.0.0`
 - `PHONE_BRIDGE_PORT=8765`
@@ -97,8 +98,12 @@ export NO_PROXY=localhost,127.0.0.1
 
 Some proxies close idle long-polling requests after about 30 seconds. Keep
 `TELEGRAM_POLL_TIMEOUT` lower than the proxy idle timeout, for example `20`.
-The same proxy variables are forwarded into the Claude tmux session by default,
-so Claude Code starts with the proxy environment too.
+Set `CLAUDE_AGENT_ENABLED=true` to start the background Claude Code tmux
+session and enable Telegram commands that forward messages, TUI keys, approvals,
+and schedule/phone prompts to Claude. When it is false, the bridge skips tmux
+startup and keeps phone, schedule, file, and stateShare features available. The
+same proxy variables are forwarded into the Claude tmux session by default, so
+Claude Code starts with the proxy environment too.
 By default, pending Telegram updates are dropped when the bridge starts. This
 prevents old messages from being replayed into Claude after restarts.
 If your proxy still closes Telegram long-polling TLS connections, try

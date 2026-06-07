@@ -130,6 +130,53 @@ Bash command
         self.assertEqual(event.kind, "confirmation")
         self.assertIn("Do you want to proceed?", event.text)
 
+    def test_wait_ignores_stale_command_approval_from_scrollback(self) -> None:
+        baseline = """
+Bash command
+
+ This command requires approval
+
+ Do you want to proceed?
+ ❯ 1. Yes
+   2. Yes, and don’t ask again for: tmux ls *
+   3. No
+
+────────────────────────────────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────────────────────────────────
+"""
+        screen = (
+            baseline
+            + """
+❯ hello
+
+● Fresh answer from Claude.
+
+  Thought for 1s (ctrl+o to expand)
+
+✻ Brewed for 3s
+
+────────────────────────────────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────────────────────────────────
+  ? for shortcuts
+"""
+        )
+        screens = iter([screen, screen])
+        times = iter([0, 1, 2, 3])
+        waiter = ReplyWaiter(
+            lambda: next(screens),
+            poll_interval=0.1,
+            stable_polls=2,
+            sleep=lambda _: None,
+            clock=lambda: next(times),
+        )
+
+        event = waiter.wait(baseline, timeout=10)
+
+        self.assertEqual(event.kind, "done")
+        self.assertIn("Fresh answer from Claude.", event.text)
+
     def test_wait_returns_interactive_model_menu(self) -> None:
         screen = """
 ────────────────────────────────────────────────────────────────────────────────

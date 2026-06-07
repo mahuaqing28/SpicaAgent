@@ -24,9 +24,19 @@ class ConfigTests(unittest.TestCase):
 
         self.assertIn("HTTPS_PROXY", config.claude_forward_env_vars)
         self.assertIn("http_proxy", config.claude_forward_env_vars)
+        self.assertFalse(config.claude_agent_enabled)
         self.assertFalse(config.phone_bridge_enabled)
         self.assertEqual(config.phone_bridge_host, "0.0.0.0")
         self.assertEqual(config.phone_bridge_port, 8765)
+
+    def test_claude_agent_enabled_is_optional(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp)
+            env = self.make_base_env(path)
+            env["CLAUDE_AGENT_ENABLED"] = "true"
+            config = AppConfig.from_env(env, cwd=path)
+
+        self.assertTrue(config.claude_agent_enabled)
 
     def test_rejects_invalid_forward_env_name(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
